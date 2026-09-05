@@ -31,6 +31,9 @@ func setupTestEnvironment(t *testing.T, cmdExec cmd_test.MockCmdExec) *testSetup
 	// Initialize logging
 	log.Initialize(false)
 
+	// Keep the worktree this fixture creates inside the test's own sandbox.
+	t.Setenv("HOME", t.TempDir())
+
 	// Set up a temp working directory
 	workdir := t.TempDir()
 
@@ -51,6 +54,7 @@ func setupTestEnvironment(t *testing.T, cmdExec cmd_test.MockCmdExec) *testSetup
 		Path:    workdir,
 		Program: "bash",
 		AutoYes: false,
+		Branch:  "test/" + sessionName,
 	})
 	require.NoError(t, err)
 
@@ -218,18 +222,12 @@ func TestPreviewScrolling(t *testing.T) {
 	setup := setupTestEnvironment(t, cmdExec)
 	defer setup.cleanupFn()
 
-	// Simulate running a command that produces lots of output
-	err := setup.instance.SendKeys("seq 100")
-	require.NoError(t, err)
-	err = setup.instance.SendKeys("") // Simulate pressing Enter
-	require.NoError(t, err)
-
 	// Create the preview pane
 	previewPane := NewPreviewPane()
 	previewPane.SetSize(80, 30) // Set reasonable size for testing
 
 	// Step 1: Check initial content - should show normal preview mode
-	err = previewPane.UpdateContent(setup.instance)
+	err := previewPane.UpdateContent(setup.instance)
 	require.NoError(t, err)
 
 	// Verify we're not in scrolling mode initially

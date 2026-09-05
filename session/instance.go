@@ -50,14 +50,16 @@ type Instance struct {
 	UpdatedAt time.Time
 	// AutoYes is true if the instance should automatically press enter when prompted.
 	AutoYes bool
-	// Prompt is the initial prompt to pass to the instance on startup
-	Prompt string
 
 	// DiffStats stores the current git diff statistics
 	diffStats *git.DiffStats
 
-	// selectedBranch is the existing branch to start on (empty = new branch from HEAD)
-	selectedBranch string
+	// branchName is the branch the session works on. It is chosen during creation, and
+	// Start refuses a session that has none: nothing derives one from the title.
+	branchName string
+	// existingBranch is true when branchName was already in the repository, in which case
+	// the session works on it and leaves it behind when it is closed.
+	existingBranch bool
 
 	// The below fields are initialized upon calling Start().
 
@@ -156,8 +158,11 @@ type InstanceOptions struct {
 	Program string
 	// If AutoYes is true, then
 	AutoYes bool
-	// Branch is an existing branch name to start the session on (empty = new branch from HEAD)
+	// Branch is the branch the session works on. A session cannot start without one.
 	Branch string
+	// ExistingBranch is true when Branch is already in the repository, in which case the
+	// session works on it and leaves it behind when it is closed.
+	ExistingBranch bool
 }
 
 func NewInstance(opts InstanceOptions) (*Instance, error) {
@@ -179,7 +184,8 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 		CreatedAt:      t,
 		UpdatedAt:      t,
 		AutoYes:        false,
-		selectedBranch: opts.Branch,
+		branchName:     opts.Branch,
+		existingBranch: opts.ExistingBranch,
 	}, nil
 }
 
@@ -194,9 +200,13 @@ func (i *Instance) SetStatus(status Status) {
 	i.Status = status
 }
 
-// SetSelectedBranch sets the branch to use when starting the instance.
-func (i *Instance) SetSelectedBranch(branch string) {
-	i.selectedBranch = branch
+// SetBranch sets the branch the session will work on. existing marks a branch that is
+// already in the repository, which is checked out rather than created and is left behind
+// when the session is closed.
+func (i *Instance) SetBranch(branch string, existing bool) {
+	i.branchName = branch
+	i.existingBranch = existing
+	i.Branch = branch
 }
 
 // firstTimeSetup is true if this is a new instance. Otherwise, it's one loaded from storage.
@@ -216,21 +226,17 @@ func (i *Instance) Start(firstTimeSetup bool) error {
 	i.tmuxSession = tmuxSession
 
 	if firstTimeSetup {
-		if i.selectedBranch != "" {
-			gitWorktree, err := git.NewGitWorktreeFromBranch(i.Path, i.selectedBranch, i.Title)
-			if err != nil {
-				return fmt.Errorf("failed to create git worktree from branch: %w", err)
-			}
-			i.gitWorktree = gitWorktree
-			i.Branch = i.selectedBranch
-		} else {
-			gitWorktree, branchName, err := git.NewGitWorktree(i.Path, i.Title)
-			if err != nil {
-				return fmt.Errorf("failed to create git worktree: %w", err)
-			}
-			i.gitWorktree = gitWorktree
-			i.Branch = branchName
+		// The branch is chosen before a session starts, and it is the user's to choose:
+		// deriving one from the title here is exactly what this application stopped doing.
+		if i.branchName == "" {
+			return fmt.Errorf("cannot start session %q: no branch was chosen", i.Title)
 		}
+		gitWorktree, err := git.NewGitWorktreeForBranch(i.Path, i.branchName, i.Title, i.existingBranch)
+		if err != nil {
+			return fmt.Errorf("failed to create git worktree: %w", err)
+		}
+		i.gitWorktree = gitWorktree
+		i.Branch = i.branchName
 	}
 
 	// Setup error handler to cleanup resources on any error
@@ -408,6 +414,12 @@ func (i *Instance) SetTitle(title string) error {
 	}
 	i.Title = title
 	return nil
+}
+
+// UsesExistingBranch reports whether the session works on a branch that was already in
+// the repository, which is left behind when the session is closed.
+func (i *Instance) UsesExistingBranch() bool {
+	return i.existingBranch
 }
 
 func (i *Instance) Paused() bool {
@@ -628,27 +640,6 @@ func (i *Instance) GetDiffStats() *git.DiffStats {
 	return i.diffStats
 }
 
-// SendPrompt sends a prompt to the tmux session
-func (i *Instance) SendPrompt(prompt string) error {
-	if !i.started {
-		return fmt.Errorf("instance not started")
-	}
-	if i.tmuxSession == nil {
-		return fmt.Errorf("tmux session not initialized")
-	}
-	if err := i.tmuxSession.SendKeys(prompt); err != nil {
-		return fmt.Errorf("error sending keys to tmux session: %w", err)
-	}
-
-	// Brief pause to prevent carriage return from being interpreted as newline
-	time.Sleep(100 * time.Millisecond)
-	if err := i.tmuxSession.TapEnter(); err != nil {
-		return fmt.Errorf("error tapping enter: %w", err)
-	}
-
-	return nil
-}
-
 // PreviewFullHistory captures the entire tmux pane output including full scrollback history
 func (i *Instance) PreviewFullHistory() (string, error) {
 	if !i.started || i.Status == Paused {
@@ -660,12 +651,4 @@ func (i *Instance) PreviewFullHistory() (string, error) {
 // SetTmuxSession sets the tmux session for testing purposes
 func (i *Instance) SetTmuxSession(session *tmux.TmuxSession) {
 	i.tmuxSession = session
-}
-
-// SendKeys sends keys to the tmux session
-func (i *Instance) SendKeys(keys string) error {
-	if !i.started || i.Status == Paused {
-		return fmt.Errorf("cannot send keys to instance that has not been started or is paused")
-	}
-	return i.tmuxSession.SendKeys(keys)
 }

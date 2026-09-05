@@ -58,6 +58,8 @@ func mockCmdExec(captureContent string, sessionExists bool) cmd_test.MockCmdExec
 // makeStartedInstance creates a minimal instance that reports as started with the given title.
 func makeStartedInstance(t *testing.T, title string) *session.Instance {
 	t.Helper()
+	// Keep the worktree this fixture creates inside the test's own sandbox.
+	t.Setenv("HOME", t.TempDir())
 	workdir := t.TempDir()
 	setupGitRepo(t, workdir)
 
@@ -90,6 +92,7 @@ func makeStartedInstance(t *testing.T, title string) *session.Instance {
 		Path:    workdir,
 		Program: "bash",
 		AutoYes: false,
+		Branch:  "test/" + sessionName,
 	})
 	require.NoError(t, err)
 

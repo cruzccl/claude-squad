@@ -236,11 +236,6 @@ func (t *TmuxSession) TapDAndEnter() error {
 	return nil
 }
 
-func (t *TmuxSession) SendKeys(keys string) error {
-	_, err := t.ptmx.Write([]byte(keys))
-	return err
-}
-
 // HasUpdated checks if the tmux pane content has changed since the last tick. It also returns true if
 // the tmux pane has a prompt for aider or claude code.
 func (t *TmuxSession) HasUpdated() (updated bool, hasPrompt bool) {
