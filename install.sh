@@ -2,6 +2,24 @@
 
 set -e
 
+# This is a personal fork with no published releases, so there is nothing to download:
+# the script builds the checked-out source and installs the resulting binary.
+
+resolve_repo_root() {
+    # The source has to be on disk to build it, which rules out `curl ... | bash`.
+    if [ -z "${BASH_SOURCE[0]}" ] || [ ! -f "${BASH_SOURCE[0]}" ]; then
+        err "install.sh builds from source, so it has to be run from a clone of the repository:
+    git clone https://github.com/cruzccl/claude-squad.git
+    cd claude-squad && ./install.sh"
+    fi
+
+    REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+
+    if [ ! -f "$REPO_ROOT/go.mod" ]; then
+        err "no go.mod in $REPO_ROOT — install.sh must sit at the root of the repository."
+    fi
+}
+
 setup_shell_and_path() {
     BIN_DIR=${BIN_DIR:-$HOME/.local/bin}
 
@@ -28,145 +46,22 @@ setup_shell_and_path() {
     fi
 }
 
-detect_platform_and_arch() {
+detect_platform() {
+    # Only the platform is needed now: the Go toolchain picks the architecture itself.
     PLATFORM="$(uname | tr '[:upper:]' '[:lower:]')"
     if [[ "$PLATFORM" == mingw*_nt* ]]; then
         PLATFORM="windows"
-    fi
-
-    ARCHITECTURE="$(uname -m)"
-    if [ "${ARCHITECTURE}" = "x86_64" ]; then
-        # Redirect stderr to /dev/null to avoid printing errors if non Rosetta.
-        if [ "$(sysctl -n sysctl.proc_translated 2>/dev/null)" = "1" ]; then
-            ARCHITECTURE="arm64" # Rosetta.
-        else
-            ARCHITECTURE="amd64" # Intel.
-        fi
-    elif [ "${ARCHITECTURE}" = "arm64" ] || [ "${ARCHITECTURE}" = "aarch64" ]; then
-        ARCHITECTURE="arm64" # Arm.
-    else
-        ARCHITECTURE="amd64" # Amd.
-    fi
-
-    if [[ "$PLATFORM" == "windows" ]]; then
-        ARCHIVE_EXT=".zip"
         EXTENSION=".exe"
     else
-        ARCHIVE_EXT=".tar.gz"
         EXTENSION=""
     fi
-}
-
-get_latest_version() {
-    # Get latest version from GitHub API, including prereleases
-    API_RESPONSE=$(curl -sS "https://api.github.com/repos/smtg-ai/claude-squad/releases")
-    if [ $? -ne 0 ]; then
-        echo "Failed to connect to GitHub API"
-        exit 1
-    fi
-    
-    if echo "$API_RESPONSE" | grep -q "Not Found"; then
-        echo "No releases found in the repository"
-        exit 1
-    fi
-    
-    # Get the first release (latest) from the array
-    LATEST_VERSION=$(echo "$API_RESPONSE" | grep -m1 '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/' | sed 's/^v//')
-    if [ -z "$LATEST_VERSION" ]; then
-        echo "Failed to parse version from GitHub API response:"
-        echo "$API_RESPONSE" | grep -v "upload_url" # Filter out long upload_url line
-        exit 1
-    fi
-    echo "$LATEST_VERSION"
-}
-
-download_release() {
-    local version=$1
-    local binary_url=$2
-    local archive_name=$3
-    local tmp_dir=$4
-
-    echo "Downloading binary from $binary_url"
-    DOWNLOAD_OUTPUT=$(curl -sS -L -f -w '%{http_code}' "$binary_url" -o "${tmp_dir}/${archive_name}" 2>&1)
-    HTTP_CODE=$?
-    
-    if [ $HTTP_CODE -ne 0 ]; then
-        echo "Error: Failed to download release asset"
-        echo "This could be because:"
-        echo "1. The release ${version} doesn't have assets uploaded yet"
-        echo "2. The asset for ${PLATFORM}_${ARCHITECTURE} wasn't built"
-        echo "3. The asset name format has changed"
-        echo ""
-        echo "Expected asset name: ${archive_name}"
-        echo "URL attempted: ${binary_url}"
-        if [ "$version" == "latest" ]; then
-            echo ""
-            echo "Tip: Try installing a specific version instead of 'latest'"
-            echo "Available versions:"
-            echo "$API_RESPONSE" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/' | sed 's/^v//'
-        fi
-        rm -rf "$tmp_dir"
-        exit 1
-    fi
-}
-
-extract_and_install() {
-    local tmp_dir=$1
-    local archive_name=$2
-    local bin_dir=$3
-    local extension=$4
-
-    if [[ "$PLATFORM" == "windows" ]]; then
-        if ! unzip -t "${tmp_dir}/${archive_name}" > /dev/null 2>&1; then
-            echo "Error: Downloaded file is not a valid zip archive"
-            rm -rf "$tmp_dir"
-            exit 1
-        fi
-        ensure unzip "${tmp_dir}/${archive_name}" -d "$tmp_dir"
-    else
-        if ! tar tzf "${tmp_dir}/${archive_name}" > /dev/null 2>&1; then
-            echo "Error: Downloaded file is not a valid tar.gz archive"
-            rm -rf "$tmp_dir"
-            exit 1
-        fi
-        ensure tar xzf "${tmp_dir}/${archive_name}" -C "$tmp_dir"
-    fi
-
-    if [ ! -d "$bin_dir" ]; then
-        mkdir -p "$bin_dir"
-    fi
-
-    # Remove existing binary if upgrading
-    if [ "$UPGRADE_MODE" = true ] && [ -f "$bin_dir/$INSTALL_NAME${extension}" ]; then
-        echo "Removing previous installation from $bin_dir/$INSTALL_NAME${extension}"
-        rm -f "$bin_dir/$INSTALL_NAME${extension}"
-    fi
-
-    # Install binary with desired name
-    mv "${tmp_dir}/claude-squad${extension}" "$bin_dir/$INSTALL_NAME${extension}"
-    rm -rf "$tmp_dir"
-
-    if [ ! -f "$bin_dir/$INSTALL_NAME${extension}" ]; then
-        echo "Installation failed, could not find $bin_dir/$INSTALL_NAME${extension}"
-        exit 1
-    fi
-
-    chmod +x "$bin_dir/$INSTALL_NAME${extension}"
-    
-    echo ""
-    if [ "$UPGRADE_MODE" = true ]; then
-        echo "Successfully upgraded '$INSTALL_NAME' to:"
-    else
-        echo "Installed as '$INSTALL_NAME':"
-    fi
-    echo "$("$bin_dir/$INSTALL_NAME${extension}" version)"
 }
 
 check_command_exists() {
     if command -v "$INSTALL_NAME" &> /dev/null; then
         EXISTING_PATH=$(which "$INSTALL_NAME")
         echo "Found existing installation of '$INSTALL_NAME' at $EXISTING_PATH"
-        echo "Will upgrade to the latest version"
+        echo "Will rebuild from the current source"
         UPGRADE_MODE=true
     else
         UPGRADE_MODE=false
@@ -175,11 +70,20 @@ check_command_exists() {
 
 check_and_install_dependencies() {
     echo "Checking for required dependencies..."
-    
+
+    # Check for the Go toolchain. Unlike tmux and gh this is not installed automatically:
+    # distribution packages are often older than the version go.mod asks for, and picking
+    # a toolchain is the kind of decision to leave to whoever runs this.
+    if ! command -v go &> /dev/null; then
+        err "Go is not installed, and it is needed to build from source.
+Install it from https://go.dev/dl/ and run this script again."
+    fi
+    echo "Go is already installed ($(go version))."
+
     # Check for tmux
     if ! command -v tmux &> /dev/null; then
         echo "tmux is not installed. Installing tmux..."
-        
+
         if [[ "$PLATFORM" == "darwin" ]]; then
             # macOS
             if command -v brew &> /dev/null; then
@@ -208,16 +112,16 @@ check_and_install_dependencies() {
             echo "For Windows, please install tmux via WSL or another method."
             exit 1
         fi
-        
+
         echo "tmux installed successfully."
     else
         echo "tmux is already installed."
     fi
-    
+
     # Check for GitHub CLI (gh)
     if ! command -v gh &> /dev/null; then
         echo "GitHub CLI (gh) is not installed. Installing GitHub CLI..."
-        
+
         if [[ "$PLATFORM" == "darwin" ]]; then
             # macOS
             if command -v brew &> /dev/null; then
@@ -256,20 +160,64 @@ check_and_install_dependencies() {
             echo "Visit https://github.com/cli/cli#installation for installation instructions."
             exit 1
         fi
-        
+
         echo "GitHub CLI (gh) installed successfully."
     else
         echo "GitHub CLI (gh) is already installed."
     fi
-    
+
     echo "All dependencies are installed."
+}
+
+build_and_install() {
+    local bin_dir=$1
+    local extension=$2
+
+    # Build into a temporary directory rather than straight over the installed binary, so
+    # a build that fails leaves the working installation alone.
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    # Expanded now, not when the trap runs: tmp_dir is local and out of scope by then.
+    trap "rm -rf '$tmp_dir'" EXIT
+
+    echo ""
+    echo "Building from $REPO_ROOT"
+    ensure go build -C "$REPO_ROOT" -o "${tmp_dir}/${INSTALL_NAME}${extension}" .
+
+    if [ ! -d "$bin_dir" ]; then
+        mkdir -p "$bin_dir"
+    fi
+
+    # Remove the existing binary rather than writing over it: overwriting one that is
+    # currently running fails with "text file busy".
+    if [ "$UPGRADE_MODE" = true ] && [ -f "$bin_dir/$INSTALL_NAME${extension}" ]; then
+        echo "Removing previous installation from $bin_dir/$INSTALL_NAME${extension}"
+        rm -f "$bin_dir/$INSTALL_NAME${extension}"
+    fi
+
+    ensure mv "${tmp_dir}/${INSTALL_NAME}${extension}" "$bin_dir/$INSTALL_NAME${extension}"
+
+    if [ ! -f "$bin_dir/$INSTALL_NAME${extension}" ]; then
+        echo "Installation failed, could not find $bin_dir/$INSTALL_NAME${extension}"
+        exit 1
+    fi
+
+    chmod +x "$bin_dir/$INSTALL_NAME${extension}"
+
+    echo ""
+    if [ "$UPGRADE_MODE" = true ]; then
+        echo "Successfully rebuilt '$INSTALL_NAME' as:"
+    else
+        echo "Installed as '$INSTALL_NAME':"
+    fi
+    echo "$("$bin_dir/$INSTALL_NAME${extension}" version)"
 }
 
 main() {
     # Parse command line arguments
     INSTALL_NAME="cs"
     UPGRADE_MODE=false
-    
+
     while [[ $# -gt 0 ]]; do
         case $1 in
             --name)
@@ -284,25 +232,15 @@ main() {
         esac
     done
 
+    resolve_repo_root
     check_command_exists
-    detect_platform_and_arch
-    
+    detect_platform
+
     check_and_install_dependencies
-    
+
     setup_shell_and_path
 
-    VERSION=${VERSION:-"latest"}
-    if [[ "$VERSION" == "latest" ]]; then
-        VERSION=$(get_latest_version)
-    fi
-
-    RELEASE_URL="https://github.com/smtg-ai/claude-squad/releases/download/v${VERSION}"
-    ARCHIVE_NAME="claude-squad_${VERSION}_${PLATFORM}_${ARCHITECTURE}${ARCHIVE_EXT}"
-    BINARY_URL="${RELEASE_URL}/${ARCHIVE_NAME}"
-    TMP_DIR=$(mktemp -d)
-    
-    download_release "$VERSION" "$BINARY_URL" "$ARCHIVE_NAME" "$TMP_DIR"
-    extract_and_install "$TMP_DIR" "$ARCHIVE_NAME" "$BIN_DIR" "$EXTENSION"
+    build_and_install "$BIN_DIR" "$EXTENSION"
 }
 
 # Run a command that should never fail. If the command fails execution
