@@ -14,17 +14,25 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime/debug"
+	"time"
 
 	"github.com/spf13/cobra"
 )
 
+// forkRepoURL is this fork, which is where a build of it can be looked up.
+const forkRepoURL = "https://github.com/cruzccl/claude-squad"
+
 var (
-	version     = "1.0.20"
-	programFlag string
-	autoYesFlag bool
-	daemonFlag  bool
-	binName     string
-	rootCmd     = &cobra.Command{
+	// upstreamVersion is the release of smtg-ai/claude-squad this fork was taken from. It
+	// is not the version of this binary: builds come from whatever source is in the
+	// working tree, so what identifies one is its commit, not this number.
+	upstreamVersion = "1.0.20"
+	programFlag     string
+	autoYesFlag     bool
+	daemonFlag      bool
+	binName         string
+	rootCmd         = &cobra.Command{
 		Use:   "claude-squad",
 		Short: "Claude Squad - Manage multiple AI agents like Claude Code, Aider, Codex, and Amp.",
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -139,11 +147,61 @@ var (
 		Use:   "version",
 		Short: "Print the version number",
 		Run: func(cmd *cobra.Command, args []string) {
-			fmt.Printf("%s version %s\n", binName, version)
-			fmt.Printf("https://github.com/smtg-ai/claude-squad/releases/tag/v%s\n", version)
+			revision, modified, built, ok := buildRevision()
+			if !ok {
+				// Nothing here identifies the code this was built from, so claim nothing
+				// beyond where the fork started.
+				fmt.Printf("%s (forked from claude-squad %s)\n", binName, upstreamVersion)
+				return
+			}
+
+			build := fmt.Sprintf("%s+%s", upstreamVersion, shortRevision(revision))
+			if modified {
+				// install.sh builds the working tree, so a binary can correspond to no
+				// commit at all. Say so rather than name a commit it does not match.
+				build += "-dirty"
+			}
+			if date, err := time.Parse(time.RFC3339, built); err == nil {
+				fmt.Printf("%s version %s (%s)\n", binName, build, date.Format("2006-01-02"))
+			} else {
+				fmt.Printf("%s version %s\n", binName, build)
+			}
+			fmt.Printf("%s/commit/%s\n", forkRepoURL, revision)
 		},
 	}
 )
+
+// buildRevision reports the commit this binary was built from, whether the working tree
+// carried uncommitted changes at the time, and when that commit was made. Go records all
+// three whenever it builds from a git checkout, which is how this fork is installed, so
+// none of it has to be passed in at build time. ok is false when it did not record them —
+// a build from the module cache, or one passed -buildvcs=false.
+func buildRevision() (revision string, modified bool, built string, ok bool) {
+	info, available := debug.ReadBuildInfo()
+	if !available {
+		return "", false, "", false
+	}
+	for _, setting := range info.Settings {
+		switch setting.Key {
+		case "vcs.revision":
+			revision = setting.Value
+		case "vcs.modified":
+			modified = setting.Value == "true"
+		case "vcs.time":
+			built = setting.Value
+		}
+	}
+	return revision, modified, built, revision != ""
+}
+
+// shortRevision abbreviates a commit hash to the length git itself tends to print.
+func shortRevision(revision string) string {
+	const short = 7
+	if len(revision) <= short {
+		return revision
+	}
+	return revision[:short]
+}
 
 func init() {
 	rootCmd.Flags().StringVarP(&programFlag, "program", "p", "",
