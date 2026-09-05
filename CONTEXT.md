@@ -53,3 +53,10 @@ The directory on disk holding a session's git worktree, under
 The identifier tmux knows a session by, derived from the session title with tmux's own
 naming rules and prefixed with `claudesquad_`. Distinct from the branch name: the two
 are sanitised differently and are not interchangeable.
+
+**State lock**:
+The exclusive right to write the saved state — the one `state.json` that holds every
+session on the machine, whatever repository it belongs to. One `cs` holds it for as long
+as it runs, which is why a second one refuses to start. It is an advisory OS lock on
+`~/.claude-squad/state.lock`, so it exists only while its holder does.
+_Avoid_: lock file, session lock

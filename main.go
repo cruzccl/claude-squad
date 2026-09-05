@@ -11,6 +11,7 @@ import (
 	"claude-squad/session/tmux"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -35,6 +36,11 @@ var (
 	rootCmd         = &cobra.Command{
 		Use:   "claude-squad",
 		Short: "Claude Squad - Manage multiple AI agents like Claude Code, Aider, Codex, and Amp.",
+		// main prints what a command returns, once and to stderr. Cobra's own reporting
+		// would print it a second time and follow it with the usage text, which suits a
+		// command line that was typed wrong and not a program that refuses to run.
+		SilenceErrors: true,
+		SilenceUsage:  true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := context.Background()
 			log.Initialize(daemonFlag)
@@ -54,8 +60,16 @@ var (
 			}
 
 			if !git.IsGitRepo(currentDir) {
-				return fmt.Errorf("error: %s must be run from within a git repository", binName)
+				return fmt.Errorf("%s must be run from within a git repository", binName)
 			}
+
+			// Everything below here treats the saved state as its own, starting with
+			// killing the daemon, so the lock comes first.
+			stateLock, err := config.AcquireStateLock(currentDir)
+			if err != nil {
+				return alreadyRunning(err)
+			}
+			defer stateLock.Release()
 
 			cfg := config.LoadConfig()
 
@@ -91,6 +105,19 @@ var (
 		RunE: func(cmd *cobra.Command, args []string) error {
 			log.Initialize(false)
 			defer log.Close()
+
+			// Reset destroys every session, worktree and stored instance on the machine.
+			// A cs holding the state lock is using all three.
+			repoPath, err := filepath.Abs(".")
+			if err != nil {
+				log.WarningLog.Printf("failed to get working directory: %v", err)
+				repoPath = ""
+			}
+			stateLock, err := config.AcquireStateLock(repoPath)
+			if err != nil {
+				return alreadyRunning(err)
+			}
+			defer stateLock.Release()
 
 			state := config.LoadState()
 			storage, err := session.NewStorage(state)
@@ -222,12 +249,26 @@ func init() {
 	rootCmd.AddCommand(resetCmd)
 }
 
+// alreadyRunning turns a refused state lock into the message the user sees. Any other error
+// passes through untouched.
+func alreadyRunning(err error) error {
+	var held *config.StateLockHeldError
+	if !errors.As(err, &held) {
+		return err
+	}
+	if desc := held.Describe(); desc != "" {
+		return fmt.Errorf("%s is already running: %s", binName, desc)
+	}
+	return fmt.Errorf("%s is already running", binName)
+}
+
 func main() {
 	// Extract the binary name from how this was invoked
 	binName = filepath.Base(os.Args[0])
 	rootCmd.Use = binName
 
 	if err := rootCmd.Execute(); err != nil {
-		fmt.Println(err)
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
 	}
 }
