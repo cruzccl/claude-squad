@@ -485,23 +485,16 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 			return m, nil
 		}
 
+		// What the kill would do is settled before anything is destroyed. It decides both
+		// whether the kill may happen and what the confirmation promises, so a session
+		// holding unfinished work is turned away rather than asked about.
+		outcome := selected.KillOutcome()
+		if err := killRefusal(selected.Title, outcome); err != nil {
+			return m, m.handleError(err)
+		}
+
 		// Create the kill action as a tea.Cmd
 		killAction := func() tea.Msg {
-			// Get worktree and check if branch is checked out
-			worktree, err := selected.GetGitWorktree()
-			if err != nil {
-				return err
-			}
-
-			checkedOut, err := worktree.IsBranchCheckedOut()
-			if err != nil {
-				return err
-			}
-
-			if checkedOut {
-				return fmt.Errorf("instance %s is currently checked out", selected.Title)
-			}
-
 			// Clean up terminal session for this instance
 			m.tabbedWindow.CleanupTerminalForInstance(selected.Title)
 
@@ -516,8 +509,7 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 		}
 
 		// Show confirmation modal
-		message := fmt.Sprintf("[!] Kill session '%s'?", selected.Title)
-		return m, m.confirmAction(message, killAction)
+		return m, m.confirmAction(killConfirmation(selected.Title, outcome), killAction)
 	case keys.KeySubmit:
 		selected := m.list.GetSelectedInstance()
 		if selected == nil || selected.Status == session.Loading {

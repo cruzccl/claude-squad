@@ -178,13 +178,71 @@ func (g *GitWorktree) IsValidWorktree() (bool, error) {
 	return true, nil
 }
 
-// IsBranchCheckedOut checks if the instance branch is currently checked out
-func (g *GitWorktree) IsBranchCheckedOut() (bool, error) {
-	output, err := g.runGitCommand(g.repoPath, "branch", "--show-current")
+// WorktreeIsDirty reports whether the worktree holds uncommitted changes, untracked
+// files included. A worktree that is not on disk holds nothing and so is not dirty: a
+// paused session has none, and Pause commits whatever it finds before removing it.
+func (g *GitWorktree) WorktreeIsDirty() (bool, error) {
+	valid, err := g.IsValidWorktree()
 	if err != nil {
-		return false, fmt.Errorf("failed to get current branch: %w", err)
+		return false, err
 	}
-	return strings.TrimSpace(string(output)) == g.branchName, nil
+	if !valid {
+		return false, nil
+	}
+	return g.IsDirty()
+}
+
+// BranchIsUntouched reports whether the branch still points at the commit the session was
+// created from, so that deleting it would throw nothing away. It is asked of the
+// repository rather than of the worktree, because a paused session has no worktree.
+//
+// The comparison is against the recorded base commit and not against the repository's
+// current HEAD: were it HEAD, a branch with no commits of its own would read as touched
+// as soon as anyone else moved the branch it came from.
+func (g *GitWorktree) BranchIsUntouched() (bool, error) {
+	// State written by older versions can be missing the base commit. Without it there is
+	// nothing to compare against, so the branch cannot be shown to be untouched.
+	if g.baseCommitSHA == "" {
+		return false, nil
+	}
+	output, err := g.runGitCommand(g.repoPath, "rev-list", "--count",
+		fmt.Sprintf("%s..%s", g.baseCommitSHA, g.branchName))
+	if err != nil {
+		return false, fmt.Errorf("failed to count commits on branch %s: %w", g.branchName, err)
+	}
+	return strings.TrimSpace(output) == "0", nil
+}
+
+// BranchCheckedOutAtOtherWorktree returns the path of a worktree other than this
+// session's own that has the branch checked out, and whether there is one. The session's
+// own worktree always holds its own branch, so it is never the obstacle; every other
+// worktree is, including the repository's main working tree.
+func (g *GitWorktree) BranchCheckedOutAtOtherWorktree() (string, bool) {
+	where, taken := BranchCheckedOutAt(g.repoPath, g.branchName)
+	if !taken || samePath(where, g.worktreePath) {
+		return "", false
+	}
+	return where, true
+}
+
+// BranchDeletionLosesNothing reports whether deleting the session's branch would throw
+// nothing away: the session created the branch, and nothing has been committed to it
+// since. Every other answer keeps the branch, a git command that cannot answer included.
+//
+// Cleanup is the one that acts on this, and the kill confirmation asks it beforehand so
+// that it can say what is about to happen. The two can disagree — the agent runs on while
+// the confirmation is open and may commit in the gap — but only one way: the branch stops
+// being untouched and Cleanup keeps what the confirmation promised to delete.
+func (g *GitWorktree) BranchDeletionLosesNothing() bool {
+	if g.isExistingBranch {
+		return false
+	}
+	untouched, err := g.BranchIsUntouched()
+	if err != nil {
+		log.ErrorLog.Printf("could not tell whether branch %s is untouched, keeping it: %v", g.branchName, err)
+		return false
+	}
+	return untouched
 }
 
 // OpenBranchURL opens the branch URL in the default browser

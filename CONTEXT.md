@@ -15,6 +15,20 @@ than technical — it names the session in the TUI and seeds the suggested branc
 but unique across sessions, because stored state is matched by it.
 _Avoid_: session name, instance name
 
+**Pausing a session**:
+Dismantling a session's workspace while keeping everything that identifies it. The point is
+to release the branch: a branch a worktree holds cannot be checked out anywhere else, so
+pausing is what lets the user take the branch into their own working copy. The TUI reaches
+it with the key it labels "checkout", which names what the user can do next rather than what
+the act itself does.
+_Avoid_: checking out a session, stopping a session
+
+**Paused session**:
+A session that has been paused. It has no worktree on disk, its work is committed to its
+branch, its tmux session is detached but alive, and it still holds its row in the TUI list.
+Resuming rebuilds the workspace and carries on from where it stopped.
+_Avoid_: stopped session, closed session, dead session
+
 **Branch name**:
 The git branch a session commits to. It is the session's technical identity: unique
 within a repository, subject to git's naming rules, and never checked out by two
@@ -24,6 +38,12 @@ _Avoid_: branch title
 **Branch prefix**:
 A per-user string (`branch_prefix` in the config) prepended to a suggested branch name,
 so one user's branches are recognisable in a shared repository.
+
+**Untouched branch**:
+A session's branch that still points at the commit the session was created from — nothing
+has been committed to it. Says nothing about the worktree, which may hold uncommitted
+changes on an untouched branch.
+_Avoid_: empty branch, unused branch
 
 **Worktree directory**:
 The directory on disk holding a session's git worktree, under

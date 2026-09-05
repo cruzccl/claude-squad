@@ -290,6 +290,74 @@ func (i *Instance) Start(firstTimeSetup bool) error {
 	return nil
 }
 
+// KillOutcomeKind is what killing a session would do.
+type KillOutcomeKind int
+
+const (
+	// KillBlockedByDirtyWorktree means the worktree holds uncommitted changes. Removing
+	// it would discard them, so the kill is refused.
+	KillBlockedByDirtyWorktree KillOutcomeKind = iota
+	// KillBlockedByCheckout means another worktree has the branch checked out, so the
+	// kill is refused.
+	KillBlockedByCheckout
+	// KillDeletesBranch means the session created the branch and nothing was committed to
+	// it, so the session is killed and the branch deleted.
+	KillDeletesBranch
+	// KillKeepsBranch means the session is killed and the branch stays in the repository
+	// with whatever is on it.
+	KillKeepsBranch
+)
+
+// KillOutcome is what killing a session would do, resolved against the repository. One
+// value answers both questions the kill asks — whether it may happen, and what it will
+// destroy — so the confirmation and the refusal cannot describe different things.
+type KillOutcome struct {
+	Kind KillOutcomeKind
+	// Branch is the session's branch. Empty for a session that never got one.
+	Branch string
+	// CheckedOutAt is the worktree holding the branch, when Kind is KillBlockedByCheckout.
+	CheckedOutAt string
+	// BranchIsExisting is true when the branch was already in the repository before the
+	// session started. It is a reason of its own for keeping the branch, and a different
+	// one from having commits on it, so the confirmation can say which of the two applies.
+	BranchIsExisting bool
+}
+
+// KillOutcome reports what killing this session would do, without touching anything.
+//
+// Uncertainty resolves towards keeping: a git command that cannot answer leaves the
+// branch in the repository rather than blocking the kill, because D is also the way out
+// of a session whose repository has moved or broken, and a refusal there would leave a
+// row that nothing can remove.
+func (i *Instance) KillOutcome() KillOutcome {
+	if i.gitWorktree == nil {
+		return KillOutcome{Kind: KillKeepsBranch}
+	}
+	outcome := KillOutcome{
+		Kind:             KillKeepsBranch,
+		Branch:           i.gitWorktree.GetBranchName(),
+		BranchIsExisting: i.gitWorktree.IsExistingBranch(),
+	}
+
+	if dirty, err := i.gitWorktree.WorktreeIsDirty(); err != nil {
+		log.ErrorLog.Printf("could not tell whether the worktree for %q is dirty: %v", i.Title, err)
+	} else if dirty {
+		outcome.Kind = KillBlockedByDirtyWorktree
+		return outcome
+	}
+
+	if where, taken := i.gitWorktree.BranchCheckedOutAtOtherWorktree(); taken {
+		outcome.Kind = KillBlockedByCheckout
+		outcome.CheckedOutAt = where
+		return outcome
+	}
+
+	if i.gitWorktree.BranchDeletionLosesNothing() {
+		outcome.Kind = KillDeletesBranch
+	}
+	return outcome
+}
+
 // Kill terminates the instance and cleans up all resources
 func (i *Instance) Kill() error {
 	if !i.started {
@@ -527,12 +595,11 @@ func (i *Instance) Resume() error {
 		return fmt.Errorf("can only resume paused instances")
 	}
 
-	// Check if branch is checked out
-	if checked, err := i.gitWorktree.IsBranchCheckedOut(); err != nil {
-		log.ErrorLog.Print(err)
-		return fmt.Errorf("failed to check if branch is checked out: %w", err)
-	} else if checked {
-		return fmt.Errorf("cannot resume: branch is checked out, please switch to a different branch")
+	// A branch cannot be checked out twice, so a worktree holding it stands in the way of
+	// rebuilding this session's own.
+	if where, taken := i.gitWorktree.BranchCheckedOutAtOtherWorktree(); taken {
+		return fmt.Errorf("cannot resume: branch %s is checked out at %s",
+			i.gitWorktree.GetBranchName(), where)
 	}
 
 	// Setup git worktree. Setup removes and re-adds the worktree from the branch, which

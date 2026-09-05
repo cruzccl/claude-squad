@@ -74,3 +74,81 @@ func TestStartRestoresInstanceWhenTmuxSessionSurvives(t *testing.T) {
 	require.Equal(t, Running, instance.Status)
 	require.Equal(t, 1, ptyFactory.calls)
 }
+
+func mustGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	if dir != "" {
+		args = append([]string{"-C", dir}, args...)
+	}
+	out, err := exec.Command("git", args...).CombinedOutput()
+	require.NoError(t, err, "git %v: %s", args, out)
+}
+
+// sessionRepo creates a repository with one commit, under a HOME of its own so the
+// session's worktree lands somewhere temporary.
+func sessionRepo(t *testing.T) string {
+	t.Helper()
+	t.Setenv("HOME", t.TempDir())
+	dir := filepath.Join(t.TempDir(), "acme-tools")
+	mustGit(t, "", "init", dir)
+	mustGit(t, dir, "config", "user.name", "Test User")
+	mustGit(t, dir, "config", "user.email", "test@example.com")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "README.md"), []byte("hello\n"), 0644))
+	mustGit(t, dir, "add", "README.md")
+	mustGit(t, dir, "commit", "-m", "initial")
+	return dir
+}
+
+// tmuxServer stands in for the tmux server across a whole session lifecycle: the session
+// does not exist until something starts it. Starting one goes through the PTY factory
+// while every other command goes through the command runner, so both are wired to the
+// same flag.
+type tmuxServer struct {
+	t       *testing.T
+	running bool
+}
+
+func (s *tmuxServer) Start(cmd *exec.Cmd) (*os.File, error) {
+	if strings.Contains(cmd.String(), "new-session") {
+		s.running = true
+	}
+	return os.OpenFile(filepath.Join(s.t.TempDir(), "pty"), os.O_CREATE|os.O_RDWR, 0644)
+}
+
+func (s *tmuxServer) Close() {}
+
+func (s *tmuxServer) run(cmd *exec.Cmd) error {
+	if strings.Contains(cmd.String(), "has-session") && !s.running {
+		return fmt.Errorf("can't find session")
+	}
+	return nil
+}
+
+// Pausing a session commits what is in its worktree and then removes the worktree, so
+// resuming rebuilds it from a branch that by now has commits on it. The base commit is
+// what tells the kill those commits are there; were resuming to re-record it, the branch
+// would read as untouched and D would delete the work the pause had just preserved.
+func TestKillOutcomeKeepsTheBranchOfASessionResumedAfterAPause(t *testing.T) {
+	repo := sessionRepo(t)
+	server := &tmuxServer{t: t}
+
+	instance, err := NewInstance(InstanceOptions{
+		Title:   "paused-work",
+		Path:    repo,
+		Program: "claude",
+		Branch:  "carlos/paused-work",
+	})
+	require.NoError(t, err)
+	instance.SetTmuxSession(tmux.NewTmuxSessionWithDeps(
+		"paused-work", "claude", server, cmd_test.MockCmdExec{RunFunc: server.run}))
+	require.NoError(t, instance.Start(true))
+
+	// The agent leaves work in the worktree, and the pause commits it to the branch.
+	require.NoError(t, os.WriteFile(
+		filepath.Join(instance.gitWorktree.GetWorktreePath(), "work.txt"), []byte("work\n"), 0644))
+	require.NoError(t, instance.Pause())
+	require.NoError(t, instance.Resume())
+
+	require.Equal(t, KillKeepsBranch, instance.KillOutcome().Kind,
+		"the commits the pause made are exactly what a kill must not throw away")
+}

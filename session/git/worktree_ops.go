@@ -91,10 +91,18 @@ func (g *GitWorktree) setupFromExistingBranch() error {
 	return g.recordBaseCommit()
 }
 
-// recordBaseCommit stores the commit the session starts from. Diffs are computed
-// against it, so leaving it unset makes every git diff invocation fail with an
-// ambiguous argument error once the session is running.
+// recordBaseCommit stores the commit the session starts from, and only ever the first
+// one. Diffs are computed against it, so leaving it unset makes every git diff invocation
+// fail with an ambiguous argument error once the session is running.
+//
+// A session that already has a base keeps it. Setup runs again every time a paused session
+// resumes, and by then the worktree's HEAD is the branch tip: re-recording would move the
+// base onto the work the session had already committed, leaving a branch that reads as one
+// nothing was ever committed to — which is precisely the branch a kill deletes.
 func (g *GitWorktree) recordBaseCommit() error {
+	if g.baseCommitSHA != "" {
+		return nil
+	}
 	output, err := g.runGitCommand(g.worktreePath, "rev-parse", "HEAD")
 	if err != nil {
 		return fmt.Errorf("failed to get base commit hash for branch %s: %w", g.branchName, err)
@@ -135,9 +143,16 @@ func (g *GitWorktree) setupNewWorktree() error {
 	return nil
 }
 
-// Cleanup removes the worktree and associated branch
+// Cleanup removes the worktree, and the branch when deleting it would lose nothing. A
+// branch this session did not create, or one that has been committed to, is left in the
+// repository: ending a session is not a reason to destroy the work done in it.
+//
+// The question is asked before anything is removed, so that what the branch gets is
+// decided by the repository as it stood when the cleanup began.
 func (g *GitWorktree) Cleanup() error {
 	var errs []error
+
+	deleteBranch := g.BranchDeletionLosesNothing()
 
 	// Check if worktree path exists before attempting removal
 	if _, err := os.Stat(g.worktreePath); err == nil {
@@ -150,8 +165,7 @@ func (g *GitWorktree) Cleanup() error {
 		errs = append(errs, fmt.Errorf("failed to check worktree path: %w", err))
 	}
 
-	// Delete the branch using git CLI, but skip if this is a pre-existing branch
-	if !g.isExistingBranch {
+	if deleteBranch {
 		if _, err := g.runGitCommand(g.repoPath, "branch", "-D", g.branchName); err != nil {
 			// Only log if it's not a "branch not found" error
 			if !strings.Contains(err.Error(), "not found") {
