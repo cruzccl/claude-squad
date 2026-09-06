@@ -1,5 +1,7 @@
 # Killing a session refuses on uncommitted work rather than committing it
 
+Design: [kill-preserves-unfinished-work](../design/kill-preserves-unfinished-work.md)
+
 `D` used to delete a session's branch with `git branch -D` whenever the session had created
 that branch, consulting nothing but a flag fixed at creation time — not whether the branch
 had commits, not whether the worktree was dirty. We made the kill conditional: it is

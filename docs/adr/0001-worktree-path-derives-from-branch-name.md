@@ -1,5 +1,7 @@
 # Worktree paths derive from the branch name, not the session title
 
+Design: [unified-session-creation](../design/unified-session-creation.md)
+
 A session used to take its worktree path from its branch name, which was itself derived
 from the session title plus the configured branch prefix — so the title silently dictated
 both the branch and a path, and the prefix's slash leaked into the filesystem as an

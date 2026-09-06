@@ -1,6 +1,7 @@
 # Choosing the repository a session is created in
 
 Status: implemented
+ADRs: [ADR-0004](../adr/0004-active-repository-is-not-persisted.md), [ADR-0003](../adr/0003-second-cs-refused-rather-than-sharing-state.md)
 
 ## Problem Statement
 
@@ -10,7 +11,7 @@ the branch step lists that repository's branches, and nothing in the interface o
 another.
 
 Working in a second repository therefore means quitting and relaunching from it — and
-since one `cs` per machine took the state lock (ADR 0003), it also means giving up the
+since one `cs` per machine took the state lock (ADR-0003), it also means giving up the
 sessions of the first one for as long as the second runs. The lock was the right answer to
 a real corruption, but it removed something people did every day: a `cs` open in each of
 two repositories.
@@ -37,7 +38,7 @@ uses: `Active repository`, `New sessions in <root>`, or a red reason it cannot b
 
 What the step submits becomes the active repository for the rest of the run: the session
 being created is built there, and the next `n` opens on it. It is not saved. Every `cs`
-starts with the directory it was launched in, whatever was chosen last time (ADR 0004).
+starts with the directory it was launched in, whatever was chosen last time (ADR-0004).
 
 ## User Stories
 
@@ -141,7 +142,7 @@ starts with the directory it was launched in, whatever was chosen last time (ADR
 - A repository is recorded when the step is left, not when a session finally starts: a
   repository worth opening the step on is worth offering again, whether or not the
   creation it began was seen through.
-- The active repository is **not** stored (ADR 0004).
+- The active repository is **not** stored (ADR-0004).
 - The list the step offers is the active repository, then `known_repos`, then the
   repositories this application's sessions live in, deduplicated and with anything no
   longer on disk left out.
@@ -183,7 +184,7 @@ starts with the directory it was launched in, whatever was chosen last time (ADR
   looking for repositories to put in front of the user.
 - Making session titles unique per repository. That is a change to how state is located —
   storage, tmux session names, and reload matching — not a change to a validation rule.
-- Per-repository state, and with it a per-repository state lock (ADR 0003).
+- Per-repository state, and with it a per-repository state lock (ADR-0003).
 
 ## Further Notes
 

@@ -1,6 +1,7 @@
 # One cs owns the saved state
 
 Status: implemented
+ADRs: [ADR-0003](../adr/0003-second-cs-refused-rather-than-sharing-state.md)
 
 ## Problem Statement
 

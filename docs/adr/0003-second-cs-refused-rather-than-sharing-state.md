@@ -1,5 +1,7 @@
 # A second cs is refused rather than made to share the saved state
 
+Design: [one-cs-owns-the-saved-state](../design/one-cs-owns-the-saved-state.md)
+
 `~/.claude-squad/state.json` holds one list of sessions for the whole machine, and every
 `cs` loads it once at startup and rewrites it whole from that snapshot on every save. Two
 of them running at once therefore delete each other's sessions, silently and completely.

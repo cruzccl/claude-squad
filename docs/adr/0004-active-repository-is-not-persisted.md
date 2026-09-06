@@ -1,6 +1,8 @@
 # The active repository is not persisted; the launch directory wins
 
-Since a second `cs` is refused rather than made to share the saved state (ADR 0003), one
+Design: [choosing-the-repository-a-session-is-created-in](../design/choosing-the-repository-a-session-is-created-in.md)
+
+Since a second `cs` is refused rather than made to share the saved state (ADR-0003), one
 process has to be able to create sessions in every repository, so session creation opens
 by choosing one. That choice is held in memory for as long as the process runs and is
 never written down: every `cs` starts with the directory it was launched in as the active

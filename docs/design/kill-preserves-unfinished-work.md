@@ -1,6 +1,7 @@
 # Killing a session never destroys unfinished work
 
 Status: implemented
+ADRs: [ADR-0002](../adr/0002-kill-refuses-rather-than-committing.md)
 
 ## Problem Statement
 

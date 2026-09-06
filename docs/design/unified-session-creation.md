@@ -1,6 +1,7 @@
 # Unified session creation, and worktree paths derived from the branch name
 
 Status: implemented
+ADRs: [ADR-0001](../adr/0001-worktree-path-derives-from-branch-name.md)
 
 ## Problem Statement
 
