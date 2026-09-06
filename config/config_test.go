@@ -30,6 +30,16 @@ func TestGetClaudeCommand(t *testing.T) {
 		os.Setenv("PATH", originalPath)
 	}()
 
+	// GetClaudeCommand sources the shell's startup files, so the test has to be given a
+	// home of its own: reading the developer's real ~/.bashrc makes the result depend on
+	// the machine, and on a distribution whose /etc/bashrc installs a
+	// command_not_found_handle it is actively dangerous. The subtests below run with a
+	// PATH that has been emptied on purpose, and that handler reports a missing command
+	// by calling another missing command inside a command substitution, so every level
+	// forks a shell that forks a shell. Sourcing nothing leaves the handler undefined and
+	// the shell simply reports the command it could not find.
+	t.Setenv("HOME", t.TempDir())
+
 	t.Run("finds claude in PATH", func(t *testing.T) {
 		// Create a temporary directory with a mock claude executable
 		tempDir := t.TempDir()
