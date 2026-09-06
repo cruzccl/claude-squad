@@ -85,10 +85,6 @@ type home struct {
 
 	// state is the current discrete state of the application
 	state state
-	// newInstanceFinalizer is called when the creation flow finishes.
-	// It registers the new instance in the list after the instance has been started.
-	newInstanceFinalizer func()
-
 	// keySent is used to manage underlining menu items
 	keySent bool
 
@@ -168,8 +164,7 @@ func newHome(ctx context.Context, program string, autoYes bool) *home {
 
 	// Add loaded instances to the list
 	for _, instance := range instances {
-		// Call the finalizer immediately.
-		h.list.AddInstance(instance)()
+		h.list.AddInstance(instance)
 		if autoYes {
 			instance.AutoYes = true
 		}

@@ -118,7 +118,7 @@ func killTestHome(t *testing.T, repo, branch string, existingBranch bool) (*home
 	require.NoError(t, err)
 	instance.SetTmuxSession(nullTmux(t, "Session"))
 
-	h.list.AddInstance(instance)()
+	h.list.AddInstance(instance)
 	h.list.SetSelectedInstance(0)
 	require.NoError(t, h.storage.SaveInstances(h.list.GetInstances()))
 

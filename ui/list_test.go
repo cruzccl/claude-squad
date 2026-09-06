@@ -2,6 +2,10 @@ package ui
 
 import (
 	"claude-squad/session"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/charmbracelet/bubbles/spinner"
@@ -72,4 +76,42 @@ func TestMoveWithSingleItem(t *testing.T) {
 
 	require.False(t, l.MoveUp())
 	require.False(t, l.MoveDown())
+}
+
+// newListInRepos builds a list holding one unstarted session per given repository path,
+// which is the state the list is in while a newly created session is starting.
+func newListInRepos(paths ...string) *List {
+	s := spinner.New()
+	l := NewList(&s, false)
+	l.SetSize(120, 40)
+	for i, path := range paths {
+		inst, _ := session.NewInstance(session.InstanceOptions{
+			Title:   fmt.Sprintf("session-%d", i),
+			Path:    path,
+			Program: "echo",
+		})
+		inst.Branch = fmt.Sprintf("branch-%d", i)
+		l.AddInstance(inst)
+	}
+	return l
+}
+
+func TestRepoNameShownWhenReposDiffer(t *testing.T) {
+	root := t.TempDir()
+	web := filepath.Join(root, "acme-web")
+	tools := filepath.Join(root, "acme-tools")
+	require.NoError(t, os.MkdirAll(web, 0o755))
+	require.NoError(t, os.MkdirAll(tools, 0o755))
+
+	rendered := newListInRepos(web, tools).String()
+	require.Contains(t, rendered, "(acme-web)")
+	require.Contains(t, rendered, "(acme-tools)")
+}
+
+func TestRepoNameShownWithSingleRepo(t *testing.T) {
+	repo := filepath.Join(t.TempDir(), "acme-web")
+	require.NoError(t, os.MkdirAll(repo, 0o755))
+
+	rendered := newListInRepos(repo, repo).String()
+	require.Equal(t, 2, strings.Count(rendered, "(acme-web)"))
 }

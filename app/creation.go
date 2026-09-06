@@ -92,7 +92,7 @@ func (m *home) enterTitleStep(repoPath string) (tea.Model, tea.Cmd) {
 	m.rememberRepo(repoPath)
 	m.repoOverlay = nil
 
-	m.newInstanceFinalizer = m.list.AddInstance(sess)
+	m.list.AddInstance(sess)
 	m.list.SetSelectedInstance(m.list.NumInstances() - 1)
 	m.state = stateNewTitle
 	m.menu.SetState(ui.StateNewInstance)
@@ -477,7 +477,6 @@ func (m *home) handleProgramStep(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // startNewSession finalizes the session into the list and starts it in the background.
 func (m *home) startNewSession(sess *session.Instance) (tea.Model, tea.Cmd) {
 	sess.SetStatus(session.Loading)
-	m.newInstanceFinalizer()
 	m.state = stateDefault
 	m.menu.SetState(ui.StateDefault)
 

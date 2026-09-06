@@ -189,13 +189,6 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 	}, nil
 }
 
-func (i *Instance) RepoName() (string, error) {
-	if !i.started {
-		return "", fmt.Errorf("cannot get repo name for instance that has not been started")
-	}
-	return i.gitWorktree.GetRepoName(), nil
-}
-
 // RepoPath returns the repository the session belongs to: the root git resolved when the
 // session was started, and otherwise the path it was created from — which is a repository
 // root for sessions created through the repository step, but may be a directory inside one
