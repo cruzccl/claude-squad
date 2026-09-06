@@ -29,6 +29,20 @@ branch, its tmux session is detached but alive, and it still holds its row in th
 Resuming rebuilds the workspace and carries on from where it stopped.
 _Avoid_: stopped session, closed session, dead session
 
+**Active repository**:
+The repository new sessions are created in: the one whose branches the branch step lists
+and whose HEAD a new branch starts from. It starts as the repository the directory `cs`
+was launched in belongs to — launching anywhere inside a repository means that repository —
+and changes when the first step of session creation picks another; it lives only as long
+as the process, so a launch always says which repository it means.
+_Avoid_: current repository, working repository
+
+**Known repository**:
+A repository the first step of session creation offers by name rather than making the user
+type its path: one that has sessions, or one that was picked before. What is remembered is
+what has been offered, never which one is active.
+_Avoid_: recent repository, saved repository
+
 **Branch name**:
 The git branch a session commits to. It is the session's technical identity: unique
 within a repository, subject to git's naming rules, and never checked out by two

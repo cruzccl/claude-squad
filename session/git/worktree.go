@@ -73,7 +73,7 @@ func resolveWorktreePaths(repoPath string, branchName string) (resolvedRepo stri
 		absPath = repoPath
 	}
 
-	resolvedRepo, err = findGitRepoRoot(absPath)
+	resolvedRepo, err = RepoRoot(absPath)
 	if err != nil {
 		return "", "", err
 	}

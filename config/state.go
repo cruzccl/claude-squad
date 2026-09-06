@@ -29,6 +29,10 @@ type AppState interface {
 	GetHelpScreensSeen() uint32
 	// SetHelpScreensSeen updates the bitmask of seen help screens
 	SetHelpScreensSeen(seen uint32) error
+	// GetKnownRepos returns the known repositories, most recently chosen first
+	GetKnownRepos() []string
+	// SetKnownRepos replaces the known repositories
+	SetKnownRepos(repos []string) error
 }
 
 // StateManager combines instance storage and app state management
@@ -43,6 +47,10 @@ type State struct {
 	HelpScreensSeen uint32 `json:"help_screens_seen"`
 	// Instances stores the serialized instance data as raw JSON
 	InstancesData json.RawMessage `json:"instances"`
+	// KnownRepos are the repositories the repository step offers by name, most recently
+	// chosen first. Only what has been offered is remembered: which repository is active
+	// is not, so every run starts from the directory it was launched in.
+	KnownRepos []string `json:"known_repos"`
 }
 
 // DefaultState returns the default state
@@ -50,6 +58,7 @@ func DefaultState() *State {
 	return &State{
 		HelpScreensSeen: 0,
 		InstancesData:   json.RawMessage("[]"),
+		KnownRepos:      []string{},
 	}
 }
 
@@ -136,4 +145,33 @@ func (s *State) GetHelpScreensSeen() uint32 {
 func (s *State) SetHelpScreensSeen(seen uint32) error {
 	s.HelpScreensSeen = seen
 	return SaveState(s)
+}
+
+// GetKnownRepos returns the known repositories, most recently chosen first
+func (s *State) GetKnownRepos() []string {
+	return s.KnownRepos
+}
+
+// SetKnownRepos replaces the known repositories
+func (s *State) SetKnownRepos(repos []string) error {
+	s.KnownRepos = repos
+	return SaveState(s)
+}
+
+// PromoteKnownRepo returns the list with path at its front, holding at most keep entries.
+// A repository already in the list moves rather than repeating, so the order is the order
+// the repositories were last chosen in and nothing else has to be stored to know it.
+func PromoteKnownRepo(list []string, path string, keep int) []string {
+	promoted := make([]string, 0, len(list)+1)
+	promoted = append(promoted, path)
+	for _, other := range list {
+		if other == path {
+			continue
+		}
+		if len(promoted) == keep {
+			break
+		}
+		promoted = append(promoted, other)
+	}
+	return promoted
 }

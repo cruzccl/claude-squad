@@ -33,15 +33,26 @@ func Run(ctx context.Context, program string, autoYes bool) error {
 	return err
 }
 
+// sizedOverlay is what every overlay the model can put on screen has in common: it is
+// told how wide to be. Rendering is not part of it — the help and confirmation overlays
+// take whitespace options the creation steps do not — so currentOverlay hands back a
+// function that renders rather than the overlay itself.
+type sizedOverlay interface {
+	SetWidth(width int)
+}
+
 type state int
 
 const (
 	stateDefault state = iota
-	// stateNewTitle is the first step of session creation: naming the session.
+	// stateNewRepo is the first step of session creation: the repository the session is
+	// created in.
+	stateNewRepo
+	// stateNewTitle is the second step: naming the session.
 	stateNewTitle
-	// stateNewBranch is the second step: the branch the session works on.
+	// stateNewBranch is the third step: the branch the session works on.
 	stateNewBranch
-	// stateNewProgram is the third step: the program to run. It is only entered when
+	// stateNewProgram is the fourth step: the program to run. It is only entered when
 	// there is more than one profile to choose from.
 	stateNewProgram
 	// stateHelp is the state when a help screen is displayed.
@@ -57,8 +68,10 @@ type home struct {
 
 	program string
 	autoYes bool
-	// repoPath is the directory the application was started in: the repository new
-	// sessions branch from, and whose branches the branch step lists.
+	// repoPath is the active repository: the one new sessions branch from, and whose
+	// branches the branch step lists. It starts as the directory the application was
+	// started in and changes when the repository step picks another; it is never saved,
+	// so every run starts from where it was launched.
 	repoPath string
 
 	// storage is the interface for saving/loading data to/from the app's state
@@ -91,6 +104,8 @@ type home struct {
 	errBox *ui.ErrBox
 	// global spinner instance. we plumb this down to where it's needed
 	spinner spinner.Model
+	// repoOverlay is the repository step of session creation
+	repoOverlay *overlay.RepoInputOverlay
 	// branchOverlay is the branch step of session creation
 	branchOverlay *overlay.BranchInputOverlay
 	// profileOverlay is the program step of session creation
@@ -115,11 +130,17 @@ func newHome(ctx context.Context, program string, autoYes bool) *home {
 		os.Exit(1)
 	}
 
-	// New sessions branch from the repository the application was started in.
+	// New sessions branch from the repository the application was started in, named by its
+	// root so that launching cs anywhere inside a repository means the same repository.
+	// A launch outside one leaves the directory as it is: the repository step is where
+	// that is reported, rather than here where there is nobody to tell.
 	repoPath, err := os.Getwd()
 	if err != nil {
 		log.WarningLog.Printf("failed to get working directory: %v", err)
 		repoPath = "."
+	}
+	if root, err := git.RepoRoot(repoPath); err == nil {
+		repoPath = root
 	}
 
 	h := &home{
@@ -172,14 +193,8 @@ func (m *home) updateHandleWindowSizeEvent(msg tea.WindowSizeMsg) {
 	m.tabbedWindow.SetSize(tabsWidth, contentHeight)
 	m.list.SetSize(listWidth, contentHeight)
 
-	if m.branchOverlay != nil {
-		m.branchOverlay.SetWidth(int(float32(msg.Width) * 0.6))
-	}
-	if m.profileOverlay != nil {
-		m.profileOverlay.SetWidth(int(float32(msg.Width) * 0.6))
-	}
-	if m.textOverlay != nil {
-		m.textOverlay.SetWidth(int(float32(msg.Width) * 0.6))
+	for _, ov := range m.scaledOverlays() {
+		ov.SetWidth(int(float32(msg.Width) * 0.6))
 	}
 
 	previewWidth, previewHeight := m.tabbedWindow.GetPreviewSize()
@@ -325,6 +340,67 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// currentOverlay returns the overlay the state on screen shows. The bool says whether the
+// state shows one at all, which is a different question from whether one is there: a state
+// that should have an overlay and has none is a bug, and the caller decides what to do
+// about it.
+//
+// This is the only place that maps a state to its overlay. Everything else asks here, so
+// adding a step means adding one case rather than editing every cascade that mentions the
+// states one by one.
+func (m *home) currentOverlay() (render func() string, showsOverlay bool) {
+	switch m.state {
+	case stateNewRepo:
+		if m.repoOverlay == nil {
+			return nil, true
+		}
+		return m.repoOverlay.Render, true
+	case stateNewBranch:
+		if m.branchOverlay == nil {
+			return nil, true
+		}
+		return m.branchOverlay.Render, true
+	case stateNewProgram:
+		if m.profileOverlay == nil {
+			return nil, true
+		}
+		return m.profileOverlay.Render, true
+	case stateHelp:
+		if m.textOverlay == nil {
+			return nil, true
+		}
+		// Wrapped, not taken as a method value: these two render with whitespace options
+		// the creation steps have no use for, and neither is passed any here.
+		return func() string { return m.textOverlay.Render() }, true
+	case stateConfirm:
+		if m.confirmationOverlay == nil {
+			return nil, true
+		}
+		return func() string { return m.confirmationOverlay.Render() }, true
+	}
+	return nil, false
+}
+
+// scaledOverlays are the overlays whose width follows the window, whether or not they are
+// the one on screen: an overlay opened earlier keeps its size until it is shown again. The
+// confirmation modal is not among them — it is sized to its question when it is opened.
+func (m *home) scaledOverlays() []sizedOverlay {
+	var overlays []sizedOverlay
+	if m.repoOverlay != nil {
+		overlays = append(overlays, m.repoOverlay)
+	}
+	if m.branchOverlay != nil {
+		overlays = append(overlays, m.branchOverlay)
+	}
+	if m.profileOverlay != nil {
+		overlays = append(overlays, m.profileOverlay)
+	}
+	if m.textOverlay != nil {
+		overlays = append(overlays, m.textOverlay)
+	}
+	return overlays
+}
+
 func (m *home) handleQuit() (tea.Model, tea.Cmd) {
 	if err := m.storage.SaveInstances(m.list.GetInstances()); err != nil {
 		return m, m.handleError(err)
@@ -339,8 +415,9 @@ func (m *home) handleMenuHighlighting(msg tea.KeyMsg) (cmd tea.Cmd, returnEarly 
 		m.keySent = false
 		return nil, false
 	}
-	if m.state == stateNewBranch || m.state == stateNewProgram ||
-		m.state == stateHelp || m.state == stateConfirm {
+	// While an overlay is up the keys belong to it, so the menu must not light them up as
+	// if they were the list's.
+	if _, showsOverlay := m.currentOverlay(); showsOverlay {
 		return nil, false
 	}
 	// If it's in the global keymap, we should try to highlight it.
@@ -375,6 +452,15 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 
 	if m.state == stateHelp {
 		return m.handleHelpState(msg)
+	}
+
+	// The repository step is abandoned on its own: it runs before there is a session, so
+	// there is nothing for abandonNewSession to discard.
+	if m.state == stateNewRepo {
+		if msg.String() == "ctrl+c" || msg.Type == tea.KeyEsc {
+			return m, m.abandonRepoStep()
+		}
+		return m.handleRepoStep(msg)
 	}
 
 	if m.state == stateNewTitle || m.state == stateNewBranch || m.state == stateNewProgram {
@@ -443,26 +529,8 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 			return m, m.handleError(
 				fmt.Errorf("you can't create more than %d instances", GlobalInstanceLimit))
 		}
-		instance, err := session.NewInstance(session.InstanceOptions{
-			Title:   "",
-			Path:    m.repoPath,
-			Program: m.program,
-		})
-		if err != nil {
-			return m, m.handleError(err)
-		}
-
-		m.newInstanceFinalizer = m.list.AddInstance(instance)
-		m.list.SetSelectedInstance(m.list.NumInstances() - 1)
-		m.state = stateNewTitle
-		m.menu.SetState(ui.StateNewInstance)
-
-		// Fetch in the background so the branch step lists up-to-date branches.
-		repoPath := m.repoPath
-		return m, func() tea.Msg {
-			git.FetchBranches(repoPath)
-			return nil
-		}
+		// Creation opens on the repository step: the session is built once it says where.
+		return m.enterRepoStep()
 	case keys.KeyUp:
 		m.list.Up()
 		return m, m.instanceChanged()
@@ -778,28 +846,14 @@ func (m *home) View() string {
 		m.errBox.String(),
 	)
 
-	if m.state == stateNewBranch {
-		if m.branchOverlay == nil {
-			log.ErrorLog.Printf("branch overlay is nil")
+	if render, showsOverlay := m.currentOverlay(); showsOverlay {
+		// A state that shows an overlay and has none left to show is a bug in whatever
+		// entered it. Report it and draw what is behind, rather than rendering nothing.
+		if render == nil {
+			log.ErrorLog.Printf("no overlay for state %d", m.state)
 			return mainView
 		}
-		return overlay.PlaceOverlay(0, 0, m.branchOverlay.Render(), mainView, true, true)
-	} else if m.state == stateNewProgram {
-		if m.profileOverlay == nil {
-			log.ErrorLog.Printf("profile overlay is nil")
-			return mainView
-		}
-		return overlay.PlaceOverlay(0, 0, m.profileOverlay.Render(), mainView, true, true)
-	} else if m.state == stateHelp {
-		if m.textOverlay == nil {
-			log.ErrorLog.Printf("text overlay is nil")
-		}
-		return overlay.PlaceOverlay(0, 0, m.textOverlay.Render(), mainView, true, true)
-	} else if m.state == stateConfirm {
-		if m.confirmationOverlay == nil {
-			log.ErrorLog.Printf("confirmation overlay is nil")
-		}
-		return overlay.PlaceOverlay(0, 0, m.confirmationOverlay.Render(), mainView, true, true)
+		return overlay.PlaceOverlay(0, 0, render(), mainView, true, true)
 	}
 
 	return mainView

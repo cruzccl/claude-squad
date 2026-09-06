@@ -227,7 +227,10 @@ func IsGitRepo(path string) bool {
 	return cmd.Run() == nil
 }
 
-func findGitRepoRoot(path string) (string, error) {
+// RepoRoot returns the root of the repository the given path is in. A path deeper in the
+// working tree resolves to the same root, so a repository has one name whatever part of it
+// was named.
+func RepoRoot(path string) (string, error) {
 	cmd := exec.Command("git", "-C", path, "rev-parse", "--show-toplevel")
 	out, err := cmd.Output()
 	if err != nil {

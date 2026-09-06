@@ -196,6 +196,19 @@ func (i *Instance) RepoName() (string, error) {
 	return i.gitWorktree.GetRepoName(), nil
 }
 
+// RepoPath returns the repository the session belongs to: the root git resolved when the
+// session was started, and otherwise the path it was created from — which is a repository
+// root for sessions created through the repository step, but may be a directory inside one
+// for sessions created before that step existed.
+func (i *Instance) RepoPath() string {
+	if i.gitWorktree != nil {
+		if repoPath := i.gitWorktree.GetRepoPath(); repoPath != "" {
+			return repoPath
+		}
+	}
+	return i.Path
+}
+
 func (i *Instance) SetStatus(status Status) {
 	i.Status = status
 }

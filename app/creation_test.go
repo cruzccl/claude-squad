@@ -17,6 +17,18 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// fakeAppState is the saved state the creation flow writes to, kept in memory so a test
+// never touches the state file of the machine it runs on.
+type fakeAppState struct {
+	helpScreensSeen uint32
+	knownRepos      []string
+}
+
+func (f *fakeAppState) GetHelpScreensSeen() uint32           { return f.helpScreensSeen }
+func (f *fakeAppState) SetHelpScreensSeen(seen uint32) error { f.helpScreensSeen = seen; return nil }
+func (f *fakeAppState) GetKnownRepos() []string              { return f.knownRepos }
+func (f *fakeAppState) SetKnownRepos(repos []string) error   { f.knownRepos = repos; return nil }
+
 // newTestHome builds a home model wired up enough to drive the creation flow. The start
 // command it produces is returned rather than run, so no tmux session and no worktree is
 // ever created.
@@ -32,6 +44,7 @@ func newTestHome(t *testing.T, cfg *config.Config, repoPath string) *home {
 		errBox:       ui.NewErrBox(),
 		tabbedWindow: ui.NewTabbedWindow(ui.NewPreviewPane(), ui.NewDiffPane(), ui.NewTerminalPane()),
 		spinner:      spinner.New(spinner.WithSpinner(spinner.MiniDot)),
+		appState:     &fakeAppState{},
 	}
 	h.list = ui.NewList(&h.spinner, false)
 	h.errBox.SetSize(200, 1)
@@ -91,10 +104,13 @@ func typeRunes(t *testing.T, h *home, text string) {
 	}
 }
 
-// startTitleStep presses n and types a title, leaving the flow on the title step.
+// startTitleStep presses n, accepts the active repository, and types a title, leaving the
+// flow on the title step.
 func startTitleStep(t *testing.T, h *home, title string) {
 	t.Helper()
 	press(t, h, key("n"))
+	require.Equal(t, stateNewRepo, h.state)
+	press(t, h, tea.KeyMsg{Type: tea.KeyEnter})
 	require.Equal(t, stateNewTitle, h.state)
 	typeRunes(t, h, title)
 	require.Equal(t, title, h.list.GetSelectedInstance().Title)
@@ -107,7 +123,7 @@ func newSession(h *home) *session.Instance {
 }
 
 func TestCreationFlow_TitleThenBranchStartsTheSession(t *testing.T) {
-	h := newTestHome(t, testConfig(), t.TempDir())
+	h := newTestHome(t, testConfig(), initTestRepo(t))
 
 	startTitleStep(t, h, "New feature")
 	press(t, h, tea.KeyMsg{Type: tea.KeyEnter})
@@ -126,7 +142,7 @@ func TestCreationFlow_TitleThenBranchStartsTheSession(t *testing.T) {
 }
 
 func TestCreationFlow_TitleThatSanitisesToNothingStillSuggestsABranch(t *testing.T) {
-	h := newTestHome(t, testConfig(), t.TempDir())
+	h := newTestHome(t, testConfig(), initTestRepo(t))
 
 	startTitleStep(t, h, "🚀🚀")
 	press(t, h, tea.KeyMsg{Type: tea.KeyEnter})
@@ -135,7 +151,7 @@ func TestCreationFlow_TitleThatSanitisesToNothingStillSuggestsABranch(t *testing
 }
 
 func TestCreationFlow_TheSuggestionIsNotRecomputedAfterAnEdit(t *testing.T) {
-	h := newTestHome(t, testConfig(), t.TempDir())
+	h := newTestHome(t, testConfig(), initTestRepo(t))
 
 	startTitleStep(t, h, "New feature")
 	press(t, h, tea.KeyMsg{Type: tea.KeyEnter})
@@ -157,7 +173,7 @@ func TestCreationFlow_TheSuggestionIsNotRecomputedAfterAnEdit(t *testing.T) {
 }
 
 func TestCreationFlow_InvalidBranchNameIsRejectedAndNeverRewritten(t *testing.T) {
-	h := newTestHome(t, testConfig(), t.TempDir())
+	h := newTestHome(t, testConfig(), initTestRepo(t))
 
 	startTitleStep(t, h, "New feature")
 	press(t, h, tea.KeyMsg{Type: tea.KeyEnter})
@@ -171,7 +187,7 @@ func TestCreationFlow_InvalidBranchNameIsRejectedAndNeverRewritten(t *testing.T)
 }
 
 func TestCreationFlow_EmptyBranchNameIsRejected(t *testing.T) {
-	h := newTestHome(t, testConfig(), t.TempDir())
+	h := newTestHome(t, testConfig(), initTestRepo(t))
 
 	startTitleStep(t, h, "New feature")
 	press(t, h, tea.KeyMsg{Type: tea.KeyEnter})
@@ -185,9 +201,10 @@ func TestCreationFlow_EmptyBranchNameIsRejected(t *testing.T) {
 }
 
 func TestCreationFlow_DuplicateTitleIsRejected(t *testing.T) {
-	h := newTestHome(t, testConfig(), t.TempDir())
+	h := newTestHome(t, testConfig(), initTestRepo(t))
 
-	existing, err := session.NewInstance(session.InstanceOptions{Title: "New feature", Path: t.TempDir(), Program: "claude"})
+	existing, err := session.NewInstance(session.InstanceOptions{
+		Title: "New feature", Path: initTestRepoNamed(t, "acme-web"), Program: "claude"})
 	require.NoError(t, err)
 	h.list.AddInstance(existing)
 
@@ -196,12 +213,16 @@ func TestCreationFlow_DuplicateTitleIsRejected(t *testing.T) {
 
 	require.Equal(t, stateNewTitle, h.state, "a duplicate title keeps the user on the title step")
 	require.Contains(t, h.errBox.String(), "already")
+	require.Contains(t, h.errBox.String(), existing.RepoPath(),
+		"the message names the repository the session that holds the title lives in, in "+
+			"full: two checkouts of one project have the same directory name")
 }
 
 func TestCreationFlow_EmptyTitleIsRejected(t *testing.T) {
-	h := newTestHome(t, testConfig(), t.TempDir())
+	h := newTestHome(t, testConfig(), initTestRepo(t))
 
 	press(t, h, key("n"))
+	press(t, h, tea.KeyMsg{Type: tea.KeyEnter})
 	press(t, h, tea.KeyMsg{Type: tea.KeyEnter})
 
 	require.Equal(t, stateNewTitle, h.state)
@@ -220,6 +241,13 @@ func TestCreationFlow_AbandonedAtEveryStep(t *testing.T) {
 		name string
 		toIt func(t *testing.T, h *home)
 	}{
+		{
+			name: "repository step",
+			toIt: func(t *testing.T, h *home) {
+				press(t, h, key("n"))
+				require.Equal(t, stateNewRepo, h.state)
+			},
+		},
 		{
 			name: "title step",
 			toIt: func(t *testing.T, h *home) { startTitleStep(t, h, "New feature") },
@@ -253,13 +281,14 @@ func TestCreationFlow_AbandonedAtEveryStep(t *testing.T) {
 						config.Profile{Name: "aider", Program: "aider"},
 					)
 				}
-				h := newTestHome(t, cfg, t.TempDir())
+				h := newTestHome(t, cfg, initTestRepo(t))
 				step.toIt(t, h)
 
 				press(t, h, cancel.msg)
 
 				require.Equal(t, stateDefault, h.state)
 				require.Equal(t, 0, h.list.NumInstances(), "the half-created session is discarded")
+				require.Nil(t, h.repoOverlay)
 				require.Nil(t, h.branchOverlay)
 				require.Nil(t, h.profileOverlay)
 			})
@@ -269,7 +298,7 @@ func TestCreationFlow_AbandonedAtEveryStep(t *testing.T) {
 
 func TestCreationFlow_ProgramStepOnlyAppearsWithSeveralProfiles(t *testing.T) {
 	t.Run("a single profile skips the step", func(t *testing.T) {
-		h := newTestHome(t, testConfig(config.Profile{Name: "claude", Program: "claude --verbose"}), t.TempDir())
+		h := newTestHome(t, testConfig(config.Profile{Name: "claude", Program: "claude --verbose"}), initTestRepo(t))
 
 		startTitleStep(t, h, "Solo")
 		press(t, h, tea.KeyMsg{Type: tea.KeyEnter})
@@ -284,7 +313,7 @@ func TestCreationFlow_ProgramStepOnlyAppearsWithSeveralProfiles(t *testing.T) {
 		h := newTestHome(t, testConfig(
 			config.Profile{Name: "claude", Program: "claude"},
 			config.Profile{Name: "aider", Program: "aider --model gpt"},
-		), t.TempDir())
+		), initTestRepo(t))
 
 		startTitleStep(t, h, "Duo")
 		press(t, h, tea.KeyMsg{Type: tea.KeyEnter})
@@ -301,7 +330,7 @@ func TestCreationFlow_ProgramStepOnlyAppearsWithSeveralProfiles(t *testing.T) {
 }
 
 func TestCreationFlow_ShiftNStartsNothing(t *testing.T) {
-	h := newTestHome(t, testConfig(), t.TempDir())
+	h := newTestHome(t, testConfig(), initTestRepo(t))
 
 	press(t, h, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("N")})
 
@@ -389,7 +418,7 @@ func TestBranchStep_ANameThatMatchesNothingCreatesANewBranch(t *testing.T) {
 }
 
 func TestBranchStep_StaleSearchResultsAreIgnored(t *testing.T) {
-	h := newTestHome(t, testConfig(), t.TempDir())
+	h := newTestHome(t, testConfig(), initTestRepo(t))
 	startTitleStep(t, h, "New feature")
 	press(t, h, tea.KeyMsg{Type: tea.KeyEnter})
 
@@ -404,7 +433,7 @@ func TestBranchStep_StaleSearchResultsAreIgnored(t *testing.T) {
 }
 
 func TestBranchStep_EditsAreDebouncedBeforeLookingAnythingUp(t *testing.T) {
-	h := newTestHome(t, testConfig(), t.TempDir())
+	h := newTestHome(t, testConfig(), initTestRepo(t))
 	startTitleStep(t, h, "New feature")
 	press(t, h, tea.KeyMsg{Type: tea.KeyEnter})
 
@@ -450,7 +479,12 @@ func collect(t *testing.T, cmd tea.Cmd) []tea.Msg {
 
 func initTestRepo(t *testing.T) string {
 	t.Helper()
-	repo := filepath.Join(t.TempDir(), "acme-tools")
+	return initTestRepoNamed(t, "acme-tools")
+}
+
+func initTestRepoNamed(t *testing.T, name string) string {
+	t.Helper()
+	repo := filepath.Join(t.TempDir(), name)
 	runGit(t, "", "init", repo)
 	runGit(t, repo, "config", "user.name", "Test User")
 	runGit(t, repo, "config", "user.email", "test@example.com")
@@ -493,7 +527,7 @@ func TestBranchStep_ABranchThatExistsOnlyOnTheRemoteIsWorkedOn(t *testing.T) {
 }
 
 func TestBranchStep_APickedBranchSurvivesLaterSearchResults(t *testing.T) {
-	h := newTestHome(t, testConfig(), t.TempDir())
+	h := newTestHome(t, testConfig(), initTestRepo(t))
 	startTitleStep(t, h, "New feature")
 	press(t, h, tea.KeyMsg{Type: tea.KeyEnter})
 
@@ -655,4 +689,470 @@ func TestBranchStep_ABranchAPausedSessionHoldsIsRejected(t *testing.T) {
 	require.Equal(t, stateNewBranch, h.state)
 	require.Contains(t, h.errBox.String(), "Paused work")
 	require.Empty(t, instance.Branch)
+}
+
+func TestRepoStep_WhatChoosingAPathWouldDo(t *testing.T) {
+	repo := initTestRepo(t)
+	nested := filepath.Join(repo, "cmd", "tool")
+	require.NoError(t, os.MkdirAll(nested, 0755))
+	active := initTestRepo(t)
+
+	tests := []struct {
+		name   string
+		input  string
+		root   string
+		text   string
+		blocks bool
+	}{
+		{
+			name:  "a repository other than the active one",
+			input: repo,
+			root:  repo,
+			text:  "New sessions in " + repo,
+		},
+		{
+			name:  "a directory inside a repository resolves to its root",
+			input: nested,
+			root:  repo,
+			text:  "New sessions in " + repo,
+		},
+		{
+			name:  "the active repository",
+			input: active,
+			root:  active,
+			text:  "Active repository",
+		},
+		{
+			name:   "a directory that is not a repository",
+			input:  filepath.Dir(repo),
+			text:   "Not a git repository",
+			blocks: true,
+		},
+		{
+			name:   "a path that is not there",
+			input:  filepath.Join(repo, "nowhere"),
+			text:   "Path does not exist",
+			blocks: true,
+		},
+		{
+			name:   "a file",
+			input:  filepath.Join(repo, "README.md"),
+			text:   "Not a directory",
+			blocks: true,
+		},
+		{
+			name:   "nothing typed",
+			input:  "   ",
+			blocks: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			outcome := repoChoice{typed: test.input, activeRepo: active}.resolve()
+			require.Equal(t, test.root, outcome.root)
+			require.Equal(t, test.text, outcome.text)
+			require.Equal(t, test.blocks, outcome.blocks)
+		})
+	}
+}
+
+func TestRepoStep_HomeRelativeAndRepositoryRelativePaths(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	repo := initTestRepo(t)
+	sibling := filepath.Join(filepath.Dir(repo), "other-tools")
+	runGit(t, "", "init", sibling)
+
+	t.Run("~ means the home directory", func(t *testing.T) {
+		require.Equal(t, filepath.Join(home, "projects"), repoChoice{typed: "~/projects", activeRepo: repo}.expand())
+	})
+
+	t.Run("a relative path is read from the active repository", func(t *testing.T) {
+		outcome := repoChoice{typed: "../other-tools", activeRepo: repo}.resolve()
+		require.Equal(t, sibling, outcome.root, "not from the directory cs was launched in")
+		require.False(t, outcome.blocks)
+	})
+}
+
+// clearRepoField empties the repository field, whatever it was pre-filled with.
+func clearRepoField(t *testing.T, h *home) {
+	t.Helper()
+	press(t, h, tea.KeyMsg{Type: tea.KeyCtrlU})
+	require.Equal(t, "", h.repoOverlay.Value())
+}
+
+func TestRepoStep_OpensOnTheActiveRepository(t *testing.T) {
+	repo := initTestRepo(t)
+	h := newTestHome(t, testConfig(), repo)
+
+	press(t, h, key("n"))
+
+	require.Equal(t, stateNewRepo, h.state, "creation opens on the repository step")
+	require.Equal(t, repo, h.repoOverlay.Value(), "pre-filled with the active repository")
+	require.Contains(t, h.repoOverlay.Render(), "Active repository")
+	require.Equal(t, 0, h.list.NumInstances(), "no session exists until the repository is settled")
+}
+
+func TestRepoStep_ChoosingAnotherRepositoryMovesCreationThere(t *testing.T) {
+	active := initTestRepoNamed(t, "acme-tools")
+	other := initTestRepoNamed(t, "acme-web")
+	h := newTestHome(t, testConfig(), active)
+
+	press(t, h, key("n"))
+	clearRepoField(t, h)
+	typeRunes(t, h, other)
+	press(t, h, tea.KeyMsg{Type: tea.KeyEnter})
+
+	require.Equal(t, stateNewTitle, h.state)
+	require.Equal(t, other, h.repoPath, "the chosen repository becomes the active one")
+	require.Equal(t, other, newSession(h).Path, "the session is created in it")
+
+	// And it is the one offered from now on.
+	press(t, h, tea.KeyMsg{Type: tea.KeyEsc})
+	press(t, h, key("n"))
+	require.Equal(t, other, h.repoOverlay.Value())
+}
+
+func TestRepoStep_ADirectoryInsideARepositoryNamesTheRepository(t *testing.T) {
+	repo := initTestRepo(t)
+	nested := filepath.Join(repo, "cmd", "tool")
+	require.NoError(t, os.MkdirAll(nested, 0755))
+	h := newTestHome(t, testConfig(), initTestRepoNamed(t, "acme-web"))
+
+	press(t, h, key("n"))
+	clearRepoField(t, h)
+	typeRunes(t, h, nested)
+	press(t, h, tea.KeyMsg{Type: tea.KeyEnter})
+
+	require.Equal(t, repo, h.repoPath, "the path is resolved to the repository root")
+	require.Equal(t, repo, newSession(h).Path)
+}
+
+func TestRepoStep_APathThatIsNoRepositoryIsRefused(t *testing.T) {
+	active := initTestRepo(t)
+	h := newTestHome(t, testConfig(), active)
+
+	press(t, h, key("n"))
+	clearRepoField(t, h)
+	typeRunes(t, h, t.TempDir())
+	press(t, h, tea.KeyMsg{Type: tea.KeyEnter})
+
+	require.Equal(t, stateNewRepo, h.state, "the step keeps the user until the path is one")
+	require.Contains(t, h.errBox.String(), "not a git repository")
+	require.Equal(t, active, h.repoPath, "the active repository is left alone")
+	require.Equal(t, 0, h.list.NumInstances())
+}
+
+func TestRepoStep_AnEmptyPathIsRefused(t *testing.T) {
+	h := newTestHome(t, testConfig(), initTestRepo(t))
+
+	press(t, h, key("n"))
+	clearRepoField(t, h)
+	press(t, h, tea.KeyMsg{Type: tea.KeyEnter})
+
+	require.Equal(t, stateNewRepo, h.state)
+	require.Contains(t, h.errBox.String(), "empty")
+}
+
+// Launching cs outside a repository used to fail when the worktree was created, several
+// steps later. The step is where it is caught now.
+func TestRepoStep_LaunchedOutsideARepositoryCreationCannotGoOn(t *testing.T) {
+	h := newTestHome(t, testConfig(), t.TempDir())
+
+	press(t, h, key("n"))
+	require.Contains(t, h.repoOverlay.Render(), "Not a git repository")
+
+	press(t, h, tea.KeyMsg{Type: tea.KeyEnter})
+	require.Equal(t, stateNewRepo, h.state)
+	require.Equal(t, 0, h.list.NumInstances())
+}
+
+func TestRepoStep_OffersTheActiveOneThenTheChosenThenTheOnesWithSessions(t *testing.T) {
+	active := initTestRepoNamed(t, "acme-tools")
+	chosen := initTestRepoNamed(t, "acme-web")
+	withSession := initTestRepoNamed(t, "zeta-api")
+	gone := filepath.Join(t.TempDir(), "deleted")
+
+	h := newTestHome(t, testConfig(), active)
+	h.appState.(*fakeAppState).knownRepos = []string{chosen, gone}
+	sess, err := session.NewInstance(session.InstanceOptions{
+		Title: "Elsewhere", Path: withSession, Program: "claude"})
+	require.NoError(t, err)
+	h.list.AddInstance(sess)
+
+	require.Equal(t, []string{active, chosen, withSession}, h.knownRepos(),
+		"a repository that is no longer on disk is not somewhere a session can be created")
+}
+
+func TestRepoStep_PickingFromTheListAndFilteringIt(t *testing.T) {
+	active := initTestRepoNamed(t, "acme-tools")
+	chosen := initTestRepoNamed(t, "zeta-api")
+	h := newTestHome(t, testConfig(), active)
+	h.appState.(*fakeAppState).knownRepos = []string{chosen}
+
+	press(t, h, key("n"))
+	require.Contains(t, h.repoOverlay.Render(), "zeta-api")
+
+	// Typing filters the list, and the filtered repository can be picked.
+	clearRepoField(t, h)
+	typeRunes(t, h, "zeta")
+	require.NotContains(t, h.repoOverlay.Render(), "acme-tools")
+	press(t, h, tea.KeyMsg{Type: tea.KeyDown})
+	require.Equal(t, chosen, h.repoOverlay.Value())
+
+	press(t, h, tea.KeyMsg{Type: tea.KeyEnter})
+	require.Equal(t, chosen, h.repoPath)
+}
+
+// The field opens holding a path nobody typed, so the list opens unfiltered. Once the
+// field has been edited the list is whatever the field says, and clearing the field is the
+// way back: a filter of nothing matches every known repository.
+func TestRepoStep_ClearingTheFieldBringsTheWholeListBack(t *testing.T) {
+	active := initTestRepoNamed(t, "acme-tools")
+	chosen := initTestRepoNamed(t, "zeta-api")
+	h := newTestHome(t, testConfig(), active)
+	h.appState.(*fakeAppState).knownRepos = []string{chosen}
+
+	press(t, h, key("n"))
+	require.Contains(t, h.repoOverlay.Render(), "zeta-api", "the step opens on the whole list")
+
+	// Typing onto the pre-filled path narrows the list to nothing, which is honest: no
+	// known repository is called that.
+	typeRunes(t, h, "x")
+	require.Contains(t, h.repoOverlay.Render(), "No matching repositories")
+
+	press(t, h, tea.KeyMsg{Type: tea.KeyCtrlU})
+	require.Equal(t, "", h.repoOverlay.Value())
+	require.Contains(t, h.repoOverlay.Render(), "zeta-api", "the list the step opened with")
+	require.Contains(t, h.repoOverlay.Render(), "acme-tools")
+}
+
+// ctrl+w walks back up a typed path a segment at a time, so a wrong turn costs one key
+// rather than one per character of the directory that was wrong.
+func TestRepoStep_CtrlWDropsTheLastPathSegment(t *testing.T) {
+	active := initTestRepoNamed(t, "acme-tools")
+	h := newTestHome(t, testConfig(), active)
+	sep := string(filepath.Separator)
+
+	press(t, h, key("n"))
+	press(t, h, tea.KeyMsg{Type: tea.KeyCtrlW})
+
+	require.Equal(t, filepath.Dir(active)+sep, h.repoOverlay.Value())
+}
+
+func TestRepoStep_AChosenRepositoryIsRememberedForNextTime(t *testing.T) {
+	active := initTestRepoNamed(t, "acme-tools")
+	other := initTestRepoNamed(t, "acme-web")
+	gone := filepath.Join(t.TempDir(), "deleted")
+
+	h := newTestHome(t, testConfig(), active)
+	state := h.appState.(*fakeAppState)
+	state.knownRepos = []string{gone}
+
+	press(t, h, key("n"))
+	clearRepoField(t, h)
+	typeRunes(t, h, other)
+	press(t, h, tea.KeyMsg{Type: tea.KeyEnter})
+
+	require.Equal(t, []string{other}, state.knownRepos,
+		"the chosen repository is remembered and the one that is gone is dropped")
+
+	// Abandoning the rest of the flow does not unremember it: opening the step is what
+	// says a repository is worth offering.
+	press(t, h, tea.KeyMsg{Type: tea.KeyEsc})
+	require.Equal(t, []string{other}, state.knownRepos)
+}
+
+func TestRepoStep_TabCompletesAsFarAsThereIsOnlyOneAnswer(t *testing.T) {
+	base := t.TempDir()
+	for _, name := range []string{"acme-tools", "acme-web", "zeta-api", ".hidden"} {
+		require.NoError(t, os.MkdirAll(filepath.Join(base, name), 0755))
+	}
+	require.NoError(t, os.WriteFile(filepath.Join(base, "notes.md"), []byte("x"), 0644))
+	require.NoError(t, os.Symlink(filepath.Join(base, "zeta-api"), filepath.Join(base, "linked-repo")))
+	require.NoError(t, os.Symlink(filepath.Join(base, "nowhere"), filepath.Join(base, "broken-link")))
+	sep := string(filepath.Separator)
+
+	tests := []struct {
+		name  string
+		typed string
+		want  string
+	}{
+		{
+			name:  "several candidates complete to what they share",
+			typed: filepath.Join(base, "ac"),
+			want:  filepath.Join(base, "acme-"),
+		},
+		{
+			name:  "a single candidate completes to it, ready for the next segment",
+			typed: filepath.Join(base, "z"),
+			want:  filepath.Join(base, "zeta-api") + sep,
+		},
+		{
+			name:  "a hidden directory is only offered when it is what was typed",
+			typed: base + sep + ".",
+			want:  base + sep + ".hidden" + sep,
+		},
+		{
+			name:  "a symlink to a directory is a directory",
+			typed: filepath.Join(base, "link"),
+			want:  filepath.Join(base, "linked-repo") + sep,
+		},
+		{
+			name:  "a symlink pointing nowhere is not",
+			typed: filepath.Join(base, "broken"),
+			want:  filepath.Join(base, "broken"),
+		},
+		{
+			name:  "a file is not a repository and is not completed to",
+			typed: filepath.Join(base, "not"),
+			want:  filepath.Join(base, "not"),
+		},
+		{
+			name:  "nothing matching hands back what was typed",
+			typed: filepath.Join(base, "qqq"),
+			want:  filepath.Join(base, "qqq"),
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			require.Equal(t, test.want, repoChoice{typed: test.typed, activeRepo: base}.complete().path)
+		})
+	}
+}
+
+// Tab that cannot extend the field has one thing left to offer: the directories it
+// matched. Without it the step goes silent at exactly the moment the user has no way of
+// knowing what is there — a repository they have never opened is in no list.
+func TestRepoStep_TabWithNothingToAddListsWhatItMatched(t *testing.T) {
+	active := initTestRepoNamed(t, "acme-tools")
+	parent := filepath.Dir(active)
+	for _, name := range []string{"btrfs-tools", "buttersync"} {
+		require.NoError(t, os.MkdirAll(filepath.Join(parent, name), 0755))
+	}
+	h := newTestHome(t, testConfig(), active)
+
+	press(t, h, key("n"))
+	clearRepoField(t, h)
+	typeRunes(t, h, filepath.Join(parent, "b"))
+	press(t, h, tea.KeyMsg{Type: tea.KeyTab})
+
+	require.Equal(t, filepath.Join(parent, "b"), h.repoOverlay.Value(),
+		"the two share no more than the b that is already typed")
+	require.Contains(t, h.repoOverlay.Render(), "Directories in")
+	require.Contains(t, h.repoOverlay.Render(), "btrfs-tools")
+	require.Contains(t, h.repoOverlay.Render(), "buttersync")
+
+	// A candidate is picked the way a known repository is, and is what submitting uses.
+	press(t, h, tea.KeyMsg{Type: tea.KeyDown})
+	require.Equal(t, filepath.Join(parent, "btrfs-tools"), h.repoOverlay.Value())
+
+	// Editing puts the known repositories back: the candidates answered a question about
+	// one directory, and the field no longer holds that question.
+	press(t, h, tea.KeyMsg{Type: tea.KeyCtrlU})
+	require.Contains(t, h.repoOverlay.Render(), "Known repositories")
+	require.NotContains(t, h.repoOverlay.Render(), "Directories in")
+}
+
+// The field is a name to search for and a path to a place, and which one it is cannot be
+// told from the text. Both are matched, so neither costs the other.
+func TestRepoStep_KnownRepositoriesMatchTheirNameAndTheirPath(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	active := initTestRepoNamed(t, "acme-tools")
+	underHome := filepath.Join(home, "git", "zeta-api")
+	require.NoError(t, os.MkdirAll(filepath.Dir(underHome), 0755))
+	runGit(t, "", "init", underHome)
+	sibling := filepath.Join(filepath.Dir(active), "acme-web")
+	runGit(t, "", "init", sibling)
+
+	h := newTestHome(t, testConfig(), active)
+	h.appState.(*fakeAppState).knownRepos = []string{underHome, sibling}
+
+	press(t, h, key("n"))
+
+	clearRepoField(t, h)
+	typeRunes(t, h, "zeta")
+	require.Contains(t, h.repoOverlay.Render(), "zeta-api", "a bare word is a name to search for")
+
+	// The repositories are stored as absolute paths, so a tilde matches none of them
+	// until it has been expanded into the place it stands for.
+	clearRepoField(t, h)
+	typeRunes(t, h, "~/git/")
+	require.Contains(t, h.repoOverlay.Render(), "zeta-api")
+	require.NotContains(t, h.repoOverlay.Render(), "acme-web")
+
+	// A relative path is read from the active repository, here as its sibling.
+	clearRepoField(t, h)
+	typeRunes(t, h, "../acme-web")
+	require.Contains(t, h.repoOverlay.Render(), "acme-web")
+	require.NotContains(t, h.repoOverlay.Render(), "zeta-api")
+}
+
+func TestRepoStep_TabCompletionFeedsTheField(t *testing.T) {
+	active := initTestRepoNamed(t, "acme-tools")
+	h := newTestHome(t, testConfig(), active)
+
+	press(t, h, key("n"))
+	clearRepoField(t, h)
+	typeRunes(t, h, filepath.Join(filepath.Dir(active), "acme"))
+	press(t, h, tea.KeyMsg{Type: tea.KeyTab})
+
+	require.Equal(t, active+string(filepath.Separator), h.repoOverlay.Value())
+	require.Contains(t, h.repoOverlay.Render(), "Active repository",
+		"the completed path is resolved without waiting for another key")
+	require.NotContains(t, h.repoOverlay.Render(), "No matching repositories",
+		"the separator completion leaves behind must not unlist the repository it named")
+}
+
+// Two repositories can each have a branch of the same name. A session on one of them says
+// nothing about the other.
+func TestBranchStep_ABranchIsOnlyTakenInItsOwnRepository(t *testing.T) {
+	other := initTestRepoNamed(t, "acme-web")
+
+	takeBranch := func(t *testing.T, h *home, repo string) {
+		t.Helper()
+		taken, err := session.NewInstance(session.InstanceOptions{
+			Title: "Elsewhere", Path: repo, Program: "claude"})
+		require.NoError(t, err)
+		taken.SetBranch("carlos/shared", false)
+		h.list.AddInstance(taken)
+	}
+
+	t.Run("in another repository it is free", func(t *testing.T) {
+		h := newTestHome(t, testConfig(), initTestRepoNamed(t, "acme-tools"))
+		takeBranch(t, h, other)
+
+		startTitleStep(t, h, "Shared")
+		press(t, h, tea.KeyMsg{Type: tea.KeyEnter})
+		clearBranch := h.branchOverlay.Value()
+		for range clearBranch {
+			press(t, h, tea.KeyMsg{Type: tea.KeyBackspace})
+		}
+		typeRunes(t, h, "carlos/shared")
+
+		instance := newSession(h)
+		press(t, h, tea.KeyMsg{Type: tea.KeyEnter})
+
+		require.Equal(t, stateDefault, h.state)
+		require.Equal(t, "carlos/shared", instance.Branch)
+	})
+
+	t.Run("in the same repository it is taken", func(t *testing.T) {
+		repo := initTestRepoNamed(t, "acme-tools")
+		h := newTestHome(t, testConfig(), repo)
+		takeBranch(t, h, repo)
+
+		startTitleStep(t, h, "Shared")
+		press(t, h, tea.KeyMsg{Type: tea.KeyEnter})
+		for range h.branchOverlay.Value() {
+			press(t, h, tea.KeyMsg{Type: tea.KeyBackspace})
+		}
+		typeRunes(t, h, "carlos/shared")
+		press(t, h, tea.KeyMsg{Type: tea.KeyEnter})
+
+		require.Equal(t, stateNewBranch, h.state)
+		require.Contains(t, h.errBox.String(), "already used by session")
+	})
 }

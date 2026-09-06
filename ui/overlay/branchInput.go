@@ -213,15 +213,7 @@ func (b *BranchInputOverlay) renderResults(innerWidth int) string {
 		return stepDimStyle.Render("  No matching branches")
 	}
 
-	// Window the list around the cursor so a long list stays a fixed height.
-	start := 0
-	if b.cursor >= maxVisibleBranches {
-		start = b.cursor - maxVisibleBranches + 1
-	}
-	end := start + maxVisibleBranches
-	if end > len(b.results) {
-		end = len(b.results)
-	}
+	start, end := stepListWindow(len(b.results), b.cursor, maxVisibleBranches)
 
 	var s strings.Builder
 	for i := start; i < end; i++ {
