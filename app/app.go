@@ -644,31 +644,22 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 		if selected == nil || selected.Paused() || selected.Status == session.Loading || !selected.TmuxAlive() {
 			return m, nil
 		}
-		// Terminal tab: attach to terminal session
-		if m.tabbedWindow.IsInTerminalTab() {
-			m.showHelpScreen(helpTypeInstanceAttach{}, func() {
-				ch, err := m.tabbedWindow.AttachTerminal()
-				if err != nil {
-					m.handleError(err)
-					return
-				}
-				<-ch
-				m.state = stateDefault
-			})
-			return m, nil
-		}
-		// Show help screen before attaching
+		// The tab says which side of the session the user is asking for. From there on the
+		// attachment is its own place, with its own way of moving between the two sides.
+		side := attachSideFor(m.tabbedWindow.GetActiveTab())
+		// The loop runs inside the callback, which is here when the help screen has been
+		// seen and inside the dismissal when it has not. Its commands - hiding an error
+		// box after its three seconds, refreshing the panes - are only reachable in the
+		// first case, which is every attachment after the first.
+		var attached tea.Cmd
 		m.showHelpScreen(helpTypeInstanceAttach{}, func() {
-			ch, err := m.list.Attach()
-			if err != nil {
-				m.handleError(err)
-				return
-			}
-			<-ch
-			m.state = stateDefault
-			m.instanceChanged()
+			attached = m.attach(selected, side)
 		})
-		return m, nil
+		// Being attached stretches the session's tmux to the size of the whole terminal,
+		// and nothing shrinks it back to the size of the pane it is about to be drawn in
+		// again. Ask for the size afresh so the panes are not left rendering too wide
+		// until the window happens to change.
+		return m, tea.Batch(tea.WindowSize(), attached)
 	default:
 		return m, nil
 	}

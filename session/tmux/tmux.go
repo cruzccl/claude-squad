@@ -24,6 +24,66 @@ const ProgramClaude = "claude"
 const ProgramAider = "aider"
 const ProgramGemini = "gemini"
 
+// Keystrokes claude-squad keeps for itself while a session is attached. They are read
+// before tmux sees them, so whatever the agent or the shell binds them to is unreachable
+// from inside claude-squad. Two is the whole budget; see docs/adr/0005.
+const (
+	// detachKey is ctrl+q, which hands the terminal back to the session list.
+	detachKey = 17
+	// switchKey is ctrl+y, which hands it to the session's other side instead.
+	switchKey = 25
+)
+
+// DetachReason says what the user asked for when an attached session gave the terminal
+// back. It is what tells "I am done here" apart from "show me the other side".
+type DetachReason int
+
+const (
+	// DetachedToLayout is the ordinary detach: the session list comes next.
+	DetachedToLayout DetachReason = iota
+	// DetachedToSwitch means the user asked for the session's other side - the shell if
+	// they were in the agent, the agent if they were in the shell.
+	DetachedToSwitch
+)
+
+// attachAction is what one read from stdin means to claude-squad itself.
+type attachAction int
+
+const (
+	// attachForward means the keystroke is the session's, not ours.
+	attachForward attachAction = iota
+	attachDetach
+	attachSwitch
+)
+
+// readAttachAction classifies one read from stdin. Only a keystroke arriving alone is
+// ours: a longer read is a paste or an escape sequence, and a detach key buried inside
+// one was meant for the session rather than for claude-squad.
+func readAttachAction(buf []byte) attachAction {
+	if len(buf) != 1 {
+		return attachForward
+	}
+	switch buf[0] {
+	case detachKey:
+		return attachDetach
+	case switchKey:
+		return attachSwitch
+	}
+	return attachForward
+}
+
+// detachReason says whether the action ends the attachment, and what the caller who was
+// waiting on it should do next.
+func (a attachAction) detachReason() (DetachReason, bool) {
+	switch a {
+	case attachDetach:
+		return DetachedToLayout, true
+	case attachSwitch:
+		return DetachedToSwitch, true
+	}
+	return DetachedToLayout, false
+}
+
 // TmuxSession represents a managed tmux session
 type TmuxSession struct {
 	// Initialized by NewTmuxSession
@@ -50,6 +110,9 @@ type TmuxSession struct {
 	//
 	// Channel to be closed at the very end of detaching. Used to signal callers.
 	attachCh chan struct{}
+	// detachReason is what the user asked for when the attachment ended. It is written
+	// before attachCh closes, so a caller that has received from the channel sees it.
+	detachReason DetachReason
 	// While attached, we use some goroutines to manage the window size and stdin/stdout. This stuff
 	// is used to terminate them on Detach. We don't want them to outlive the attached window.
 	ctx    context.Context
@@ -263,6 +326,7 @@ func (t *TmuxSession) HasUpdated() (updated bool, hasPrompt bool) {
 
 func (t *TmuxSession) Attach() (chan struct{}, error) {
 	t.attachCh = make(chan struct{})
+	t.detachReason = DetachedToLayout
 
 	t.wg = &sync.WaitGroup{}
 	t.wg.Add(1)
@@ -322,9 +386,9 @@ func (t *TmuxSession) Attach() (chan struct{}, error) {
 				continue
 			}
 
-			// Check for Ctrl+q (ASCII 17)
-			if nr == 1 && buf[0] == 17 {
-				// Detach from the session
+			// Keys claude-squad keeps: they end the attachment rather than reaching tmux.
+			if reason, detaches := readAttachAction(buf[:nr]).detachReason(); detaches {
+				t.detachReason = reason
 				t.Detach()
 				return
 			}
@@ -336,6 +400,12 @@ func (t *TmuxSession) Attach() (chan struct{}, error) {
 
 	t.monitorWindowSize()
 	return t.attachCh, nil
+}
+
+// DetachReason returns what the user asked for when the attachment ended. It is only
+// meaningful once the channel Attach returned has been received from.
+func (t *TmuxSession) DetachReason() DetachReason {
+	return t.detachReason
 }
 
 // DetachSafely disconnects from the current tmux session without panicking

@@ -376,3 +376,45 @@ func TestTerminalCloseForInstance(t *testing.T) {
 	require.Len(t, tp.sessions, 1, "non-existent close should not affect existing sessions")
 	tp.mu.Unlock()
 }
+
+// Switching sides while attached reaches the shell without the terminal tab ever having
+// been on screen, so the shell has to be made on demand rather than found.
+func TestTerminalEnsureSessionMakesTheShellItDoesNotHaveYet(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+
+	instance := makeStartedInstance(t, "ensure-session")
+	defer func() { _ = instance.Kill() }()
+
+	tp := NewTerminalPane()
+	tp.SetSize(80, 30)
+
+	var made []string
+	tp.newTmuxSession = func(name, program string) *tmux.TmuxSession {
+		made = append(made, name)
+		// A shell that does not exist until it is started, and exists from then on.
+		exists := false
+		cmdExec := cmd_test.MockCmdExec{
+			RunFunc: func(c *exec.Cmd) error {
+				cmdStr := c.String()
+				if strings.Contains(cmdStr, "new-session") {
+					exists = true
+					return nil
+				}
+				if strings.Contains(cmdStr, "has-session") && !exists {
+					return fmt.Errorf("session does not exist")
+				}
+				return nil
+			},
+			OutputFunc: func(c *exec.Cmd) ([]byte, error) { return []byte(""), nil },
+		}
+		return tmux.NewTmuxSessionWithDeps(name, program, &MockPtyFactory{t: t, cmdExec: cmdExec}, cmdExec)
+	}
+
+	require.NoError(t, tp.EnsureSession(instance))
+	require.Equal(t, []string{"term_" + instance.Title}, made,
+		"the shell of a session is made the first time somebody asks for it")
+
+	require.NoError(t, tp.EnsureSession(instance))
+	require.Len(t, made, 1, "a shell that is still alive is reused, not rebuilt")
+}

@@ -119,3 +119,44 @@ func TestRestoreAttachesWhenSessionExists(t *testing.T) {
 	require.Len(t, ptyFactory.cmds, 1)
 	require.Contains(t, ptyFactory.cmds[0].String(), "attach-session")
 }
+
+// While a session is attached, claude-squad reads stdin before tmux does, so the meaning
+// of a keystroke is decided here: it either ends the attachment for a reason the caller
+// acts on, or it belongs to the session and is forwarded untouched.
+
+func TestAttachInputTellsGoingBackFromSwitchingSides(t *testing.T) {
+	// Ctrl+Q hands the terminal back to the session list.
+	back := readAttachAction([]byte{detachKey})
+	require.Equal(t, attachDetach, back)
+	reason, detaches := back.detachReason()
+	require.True(t, detaches)
+	require.Equal(t, DetachedToLayout, reason, "ctrl+q means the layout, not the other side")
+
+	// Ctrl+Y hands it to the session's other side instead.
+	switched := readAttachAction([]byte{switchKey})
+	require.Equal(t, attachSwitch, switched)
+	reason, detaches = switched.detachReason()
+	require.True(t, detaches)
+	require.Equal(t, DetachedToSwitch, reason, "ctrl+y detaches only to attach the other side")
+}
+
+func TestAttachInputForwardsEverythingElse(t *testing.T) {
+	for name, input := range map[string][]byte{
+		"an ordinary keystroke":            {'a'},
+		"a key claude-squad does not want": {3}, // ctrl+c is the program's business
+		"a paste that contains ctrl+q":     {detachKey, 'a'},
+		"a paste that contains ctrl+y":     {switchKey, switchKey},
+		"nothing at all":                   {},
+	} {
+		action := readAttachAction(input)
+		require.Equal(t, attachForward, action, name)
+		_, detaches := action.detachReason()
+		require.False(t, detaches, name)
+	}
+}
+
+func TestDetachReasonBeforeAnyAttachIsTheLayout(t *testing.T) {
+	session := NewTmuxSession("never-attached", "claude")
+	require.Equal(t, DetachedToLayout, session.DetachReason(),
+		"a session nobody switched away from must not claim the other side is wanted")
+}

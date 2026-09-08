@@ -63,6 +63,25 @@ _Avoid_: empty branch, unused branch
 The directory on disk holding a session's git worktree, under
 `~/.claude-squad/worktrees/`. Derived from the branch name, not from the session title.
 
+**Agent session**:
+The tmux session running a session's agent. It is what a session is attached to by
+default, what the preview pane shows, and what pausing detaches from and resuming
+rebuilds. Distinct from the session itself, which also owns a shell.
+_Avoid_: the session's tmux, main session
+
+**Session shell**:
+The interactive shell tmux session a session owns, running in its worktree directory.
+Made the first time anything asks for it and dismantled when the session is paused or
+killed, so it is disposable in a way the agent session is not: a shell that was closed or
+never opened is simply made again.
+_Avoid_: terminal session, terminal tab
+
+**Attached**:
+The state in which one of a session's tmux sessions — its agent or its shell — owns the
+terminal, and the TUI is not drawing. Nothing of claude-squad is on screen while attached,
+which is why the keys that end it are named on the screen shown just before it starts.
+_Avoid_: opened, in the session
+
 **Tmux session name**:
 The identifier tmux knows a session by, derived from the session title with tmux's own
 naming rules and prefixed with `claudesquad_`. Distinct from the branch name: the two

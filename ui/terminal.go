@@ -38,12 +38,17 @@ type TerminalPane struct {
 
 	isScrolling bool
 	viewport    viewport.Model
+
+	// newTmuxSession makes the tmux session a shell runs in. It is a field so tests can
+	// watch shells being made without a tmux server to make them in.
+	newTmuxSession func(name, program string) *tmux.TmuxSession
 }
 
 func NewTerminalPane() *TerminalPane {
 	return &TerminalPane{
-		sessions: make(map[string]*terminalSession),
-		viewport: viewport.New(0, 0),
+		sessions:       make(map[string]*terminalSession),
+		viewport:       viewport.New(0, 0),
+		newTmuxSession: tmux.NewTmuxSession,
 	}
 }
 
@@ -113,14 +118,29 @@ func (t *TerminalPane) UpdateContent(instance *session.Instance) error {
 	return nil
 }
 
-// ensureSession creates or reuses a cached terminal tmux session for the given instance.
-func (t *TerminalPane) ensureSession(instance *session.Instance) error {
+// EnsureSession creates or reuses a cached terminal tmux session for the given instance.
+// The terminal tab does this as it draws; switching sides while attached does it because
+// nothing has drawn the tab yet.
+func (t *TerminalPane) EnsureSession(instance *session.Instance) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return t.ensureSessionLocked(instance)
+	if err := t.ensureSessionLocked(instance); err != nil {
+		return err
+	}
+	// ensureSessionLocked returns without making anything for an instance it cannot make
+	// a shell for - one that is paused, unstarted, or has no worktree - and leaves
+	// currentTitle pointing at whatever was there before. Saying so is what stops a
+	// caller from attaching to some other session's shell believing it is this one's.
+	if instance == nil {
+		return fmt.Errorf("terminal pane: no session to open a shell for")
+	}
+	if s, ok := t.sessions[instance.Title]; !ok || s.tmuxSession == nil {
+		return fmt.Errorf("terminal pane: %s has no shell to open", instance.Title)
+	}
+	return nil
 }
 
-// ensureSessionLocked is the lock-free implementation of ensureSession.
+// ensureSessionLocked is the lock-free implementation of EnsureSession.
 // Caller must hold t.mu.
 func (t *TerminalPane) ensureSessionLocked(instance *session.Instance) error {
 	if instance == nil || !instance.Started() || instance.Status == session.Paused {
@@ -149,14 +169,14 @@ func (t *TerminalPane) ensureSessionLocked(instance *session.Instance) error {
 	}
 
 	termName := "term_" + instance.Title
-	ts := tmux.NewTmuxSession(termName, shell)
+	ts := t.newTmuxSession(termName, shell)
 
 	// Check if session already exists (e.g. from a previous run)
 	if ts.DoesSessionExist() {
 		if err := ts.Restore(); err != nil {
 			// Session exists but can't restore, kill it and start fresh
 			_ = ts.Close()
-			ts = tmux.NewTmuxSession(termName, shell)
+			ts = t.newTmuxSession(termName, shell)
 			if err := ts.Start(worktreePath); err != nil {
 				return fmt.Errorf("terminal pane: failed to start session: %w", err)
 			}
@@ -197,6 +217,18 @@ func (t *TerminalPane) Attach() (chan struct{}, error) {
 	ts := s.tmuxSession
 	t.mu.Unlock()
 	return ts.Attach()
+}
+
+// DetachReason returns what the user asked for when they detached from the shell of the
+// instance on screen. It is only meaningful once the attachment has ended.
+func (t *TerminalPane) DetachReason() tmux.DetachReason {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	s, ok := t.sessions[t.currentTitle]
+	if !ok || s.tmuxSession == nil {
+		return tmux.DetachedToLayout
+	}
+	return s.tmuxSession.DetachReason()
 }
 
 // Close kills all cached terminal tmux sessions and cleans up.

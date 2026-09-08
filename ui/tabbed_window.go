@@ -3,6 +3,8 @@ package ui
 import (
 	"claude-squad/log"
 	"claude-squad/session"
+	"claude-squad/session/tmux"
+
 	"github.com/charmbracelet/lipgloss"
 )
 
@@ -187,6 +189,27 @@ func (w *TabbedWindow) GetActiveTab() int {
 // AttachTerminal attaches to the terminal tmux session
 func (w *TabbedWindow) AttachTerminal() (chan struct{}, error) {
 	return w.terminal.Attach()
+}
+
+// EnsureTerminalSession makes the shell of the given instance if it does not have one.
+// The terminal tab does this as it draws, so only switching sides while attached - which
+// reaches the shell without the tab ever being on screen - needs to ask for it.
+func (w *TabbedWindow) EnsureTerminalSession(instance *session.Instance) error {
+	return w.terminal.EnsureSession(instance)
+}
+
+// TerminalDetachReason returns what the user asked for when they detached from the shell.
+func (w *TabbedWindow) TerminalDetachReason() tmux.DetachReason {
+	return w.terminal.DetachReason()
+}
+
+// SetActiveTab shows the given tab. Detaching uses it to leave the window showing the
+// side of the session the user was last attached to.
+func (w *TabbedWindow) SetActiveTab(tab int) {
+	if tab < 0 || tab >= len(w.tabs) {
+		return
+	}
+	w.activeTab = tab
 }
 
 // CleanupTerminal closes the terminal session

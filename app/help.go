@@ -46,6 +46,7 @@ func (h helpTypeGeneral) toContent() string {
 		keyStyle.Render("J/K")+descStyle.Render("       - Reorder sessions"),
 		keyStyle.Render("↵/o")+descStyle.Render("       - Attach to the selected session"),
 		keyStyle.Render("ctrl-q")+descStyle.Render("    - Detach from session"),
+		keyStyle.Render("ctrl-y")+descStyle.Render("    - While attached, switch between the session's agent and its shell"),
 		"",
 		headerStyle.Render("Handoff:"),
 		keyStyle.Render("p")+descStyle.Render("         - Commit and push branch to github"),
@@ -87,6 +88,9 @@ func (h helpTypeInstanceAttach) toContent() string {
 		titleStyle.Render("Attaching to Instance"),
 		"",
 		descStyle.Render("To detach from a session, press ")+keyStyle.Render("ctrl-q"),
+		"",
+		descStyle.Render("To switch between the agent and the shell of this session, press ")+
+			keyStyle.Render("ctrl-y"),
 	)
 	return content
 }
@@ -113,7 +117,9 @@ func (h helpTypeInstanceStart) mask() uint32 {
 	return 1 << 1
 }
 func (h helpTypeInstanceAttach) mask() uint32 {
-	return 1 << 2
+	// 1 << 2 was this screen before it learnt to mention switching sides. The bit moved so
+	// that the new line is shown once to people who had already dismissed the old text.
+	return 1 << 4
 }
 func (h helpTypeInstanceCheckout) mask() uint32 {
 	return 1 << 3
