@@ -28,21 +28,24 @@ var removedLinesStyle = lipgloss.NewStyle().
 var pausedStyle = lipgloss.NewStyle().
 	Foreground(lipgloss.AdaptiveColor{Light: "#888888", Dark: "#888888"})
 
+// A session is three lines tall, so the blank line between two of them is all the
+// separation the list needs: padding a row above and below as well pushed the sessions
+// apart far enough that a short list stopped reading as one.
 var titleStyle = lipgloss.NewStyle().
-	Padding(1, 1, 0, 1).
+	Padding(0, 1).
 	Foreground(lipgloss.AdaptiveColor{Light: "#1a1a1a", Dark: "#dddddd"})
 
 var listDescStyle = lipgloss.NewStyle().
-	Padding(0, 1, 1, 1).
+	Padding(0, 1).
 	Foreground(lipgloss.AdaptiveColor{Light: "#A49FA5", Dark: "#777777"})
 
 var selectedTitleStyle = lipgloss.NewStyle().
-	Padding(1, 1, 0, 1).
+	Padding(0, 1).
 	Background(lipgloss.Color("#dde4f0")).
 	Foreground(lipgloss.AdaptiveColor{Light: "#1a1a1a", Dark: "#1a1a1a"})
 
 var selectedDescStyle = lipgloss.NewStyle().
-	Padding(0, 1, 1, 1).
+	Padding(0, 1).
 	Background(lipgloss.Color("#dde4f0")).
 	Foreground(lipgloss.AdaptiveColor{Light: "#1a1a1a", Dark: "#1a1a1a"})
 
@@ -110,6 +113,26 @@ func (r *InstanceRenderer) setWidth(width int) {
 // ɹ and ɻ are other options.
 const branchIcon = "Ꮧ"
 
+// The repository gets a line of its own rather than a parenthesis after the branch: the
+// list is narrow, and a repository name that only fits sometimes makes the reader check
+// whether it is missing because there is none or because the row was cut.
+const repoIcon = "⌂"
+
+// fitLine cuts text to the given width, ending it in an ellipsis when something was cut.
+// A width with no room for the ellipsis leaves nothing readable, so it renders as empty.
+func fitLine(text string, width int) string {
+	if width < 0 {
+		return ""
+	}
+	if runewidth.StringWidth(text) <= width {
+		return text
+	}
+	if width < 3 {
+		return ""
+	}
+	return runewidth.Truncate(text, width, "...")
+}
+
 func (r *InstanceRenderer) Render(i *session.Instance, idx int, selected bool) string {
 	prefix := fmt.Sprintf(" %d. ", idx)
 	if idx >= 10 {
@@ -167,51 +190,37 @@ func (r *InstanceRenderer) Render(i *session.Instance, idx int, selected bool) s
 		)
 	}
 
-	remainingWidth := r.width
-	remainingWidth -= runewidth.StringWidth(prefix)
-	remainingWidth -= runewidth.StringWidth(branchIcon)
-	remainingWidth -= 2 // for the literal " " and "-" in the branchLine format string
+	// The branch and the repository each take a line under the title, indented past the
+	// number and introduced by their own icon, so both are read the same way.
+	indent := strings.Repeat(" ", len(prefix))
+	textWidth := r.width - runewidth.StringWidth(prefix) - runewidth.StringWidth(branchIcon) - 2
 
 	diffWidth := runewidth.StringWidth(addedDiff) + runewidth.StringWidth(removedDiff)
 	if diffWidth > 0 {
 		diffWidth += 1
 	}
 
-	// Use fixed width for diff stats to avoid layout issues
-	remainingWidth -= diffWidth
-
-	// The repository is named on every session, not only when the list holds more than
-	// one: which repository a session works in is part of what it is, and a list that
-	// mentions it only sometimes makes the reader check whether the label is missing
-	// because there is one repository or because they misread the row.
-	branch := fmt.Sprintf("%s (%s)", i.Branch, filepath.Base(i.RepoPath()))
-	// Don't show branch if there's no space for it. Or show ellipsis if it's too long.
-	branchWidth := runewidth.StringWidth(branch)
-	if remainingWidth < 0 {
-		branch = ""
-	} else if remainingWidth < branchWidth {
-		if remainingWidth < 3 {
-			branch = ""
-		} else {
-			// We know the remainingWidth is at least 4 and branch is longer than that, so this is safe.
-			branch = runewidth.Truncate(branch, remainingWidth-3, "...")
-		}
+	// The diff stats sit at the end of the branch line: they count what the branch holds.
+	branch := fitLine(i.Branch, textWidth-diffWidth)
+	branchPad := textWidth - diffWidth - runewidth.StringWidth(branch)
+	if branchPad < 0 {
+		branchPad = 0
 	}
-	remainingWidth -= runewidth.StringWidth(branch)
+	branchLine := fmt.Sprintf(
+		"%s %s-%s%s%s", indent, branchIcon, branch, strings.Repeat(" ", branchPad), diff)
 
-	// Add spaces to fill the remaining width.
-	spaces := ""
-	if remainingWidth > 0 {
-		spaces = strings.Repeat(" ", remainingWidth)
+	repo := fitLine(filepath.Base(i.RepoPath()), textWidth)
+	repoPad := textWidth - runewidth.StringWidth(repo)
+	if repoPad < 0 {
+		repoPad = 0
 	}
-
-	branchLine := fmt.Sprintf("%s %s-%s%s%s", strings.Repeat(" ", len(prefix)), branchIcon, branch, spaces, diff)
+	repoLine := fmt.Sprintf("%s %s-%s%s", indent, repoIcon, repo, strings.Repeat(" ", repoPad))
 
 	// join title and subtitle
 	text := lipgloss.JoinVertical(
 		lipgloss.Left,
 		title,
-		descS.Render(branchLine),
+		descS.Render(lipgloss.JoinVertical(lipgloss.Left, branchLine, repoLine)),
 	)
 
 	return text

@@ -104,8 +104,8 @@ func TestRepoNameShownWhenReposDiffer(t *testing.T) {
 	require.NoError(t, os.MkdirAll(tools, 0o755))
 
 	rendered := newListInRepos(web, tools).String()
-	require.Contains(t, rendered, "(acme-web)")
-	require.Contains(t, rendered, "(acme-tools)")
+	require.Contains(t, rendered, repoIcon+"-acme-web")
+	require.Contains(t, rendered, repoIcon+"-acme-tools")
 }
 
 func TestRepoNameShownWithSingleRepo(t *testing.T) {
@@ -113,5 +113,24 @@ func TestRepoNameShownWithSingleRepo(t *testing.T) {
 	require.NoError(t, os.MkdirAll(repo, 0o755))
 
 	rendered := newListInRepos(repo, repo).String()
-	require.Equal(t, 2, strings.Count(rendered, "(acme-web)"))
+	require.Equal(t, 2, strings.Count(rendered, repoIcon+"-acme-web"))
+}
+
+// TestSessionTakesThreeLines pins the shape of a row: the narrow list has no room for a
+// branch and its repository side by side, so each gets a line under the session title.
+func TestSessionTakesThreeLines(t *testing.T) {
+	repo := filepath.Join(t.TempDir(), "acme-web")
+	require.NoError(t, os.MkdirAll(repo, 0o755))
+
+	var lines []string
+	for _, line := range strings.Split(newListInRepos(repo).String(), "\n") {
+		if strings.TrimSpace(line) != "" {
+			lines = append(lines, line)
+		}
+	}
+	// The list title comes first, then the three lines of the only session.
+	require.Len(t, lines, 4)
+	require.Contains(t, lines[1], "session-0")
+	require.Contains(t, lines[2], branchIcon+"-branch-0")
+	require.Contains(t, lines[3], repoIcon+"-acme-web")
 }
