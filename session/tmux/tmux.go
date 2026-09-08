@@ -44,6 +44,10 @@ const (
 	// DetachedToSwitch means the user asked for the session's other side - the shell if
 	// they were in the agent, the agent if they were in the shell.
 	DetachedToSwitch
+	// DetachedSessionEnded means nobody asked for anything: the tmux session went away
+	// under the attachment, because the shell was left with `exit` or the agent's program
+	// quit. The terminal has to be given back either way.
+	DetachedSessionEnded
 )
 
 // attachAction is what one read from stdin means to claude-squad itself.
@@ -110,9 +114,15 @@ type TmuxSession struct {
 	//
 	// Channel to be closed at the very end of detaching. Used to signal callers.
 	attachCh chan struct{}
-	// detachReason is what the user asked for when the attachment ended. It is written
-	// before attachCh closes, so a caller that has received from the channel sees it.
+	// detachReason is why the attachment ended. It is written before attachCh closes, so
+	// a caller that has received from the channel sees it.
 	detachReason DetachReason
+	// attachMu guards the three fields above as one. Two things end an attachment - a key
+	// claude-squad keeps, and the session dying under it - and they can arrive at once.
+	attachMu sync.Mutex
+	// attachGen counts attachments. A goroutine started by one of them carries its number,
+	// which is how it tells that what it is holding input for is over.
+	attachGen uint64
 	// While attached, we use some goroutines to manage the window size and stdin/stdout. This stuff
 	// is used to terminate them on Detach. We don't want them to outlive the attached window.
 	ctx    context.Context
@@ -325,8 +335,7 @@ func (t *TmuxSession) HasUpdated() (updated bool, hasPrompt bool) {
 }
 
 func (t *TmuxSession) Attach() (chan struct{}, error) {
-	t.attachCh = make(chan struct{})
-	t.detachReason = DetachedToLayout
+	attachCh, gen := t.beginAttach()
 
 	t.wg = &sync.WaitGroup{}
 	t.wg.Add(1)
@@ -345,11 +354,16 @@ func (t *TmuxSession) Attach() (chan struct{}, error) {
 		// Check if the context is done to determine if it was a normal detach
 		select {
 		case <-t.ctx.Done():
-			// Normal detach, do nothing
+			// Normal detach: whoever asked for it is tearing the attachment down already.
 		default:
-			// If context is not done, it was likely an abnormal termination (Ctrl-D)
-			// Print warning message
-			fmt.Fprintf(os.Stderr, "\n\033[31mError: Session terminated without detaching. Use Ctrl-Q to properly detach from tmux sessions.\033[0m\n")
+			// Nobody asked: the tmux session went away under us, because the shell was
+			// left with `exit` or the agent's program quit. Nothing else is going to
+			// release the caller, and there is no session left to detach from, so end the
+			// attachment here and let them return to the session list.
+			if t.endAttach(DetachedSessionEnded) {
+				log.InfoLog.Printf("tmux session %s ended while attached", t.sanitizedName)
+				t.cancel()
+			}
 		}
 	}()
 
@@ -386,10 +400,17 @@ func (t *TmuxSession) Attach() (chan struct{}, error) {
 				continue
 			}
 
+			// The session may have ended while this read was blocked, and the caller may
+			// already have attached the other side. Either way this reader is holding the
+			// terminal for something that is over, and the keystroke it just took is the
+			// price of finding out.
+			if !t.attachedAs(gen) {
+				return
+			}
+
 			// Keys claude-squad keeps: they end the attachment rather than reaching tmux.
 			if reason, detaches := readAttachAction(buf[:nr]).detachReason(); detaches {
-				t.detachReason = reason
-				t.Detach()
+				t.detachFor(reason)
 				return
 			}
 
@@ -399,13 +420,50 @@ func (t *TmuxSession) Attach() (chan struct{}, error) {
 	}()
 
 	t.monitorWindowSize()
-	return t.attachCh, nil
+	return attachCh, nil
 }
 
-// DetachReason returns what the user asked for when the attachment ended. It is only
-// meaningful once the channel Attach returned has been received from.
+// DetachReason returns why the attachment ended. It is only meaningful once the channel
+// Attach returned has been received from.
 func (t *TmuxSession) DetachReason() DetachReason {
+	t.attachMu.Lock()
+	defer t.attachMu.Unlock()
 	return t.detachReason
+}
+
+// beginAttach opens an attachment and returns the channel that closes when it ends, along
+// with its generation.
+func (t *TmuxSession) beginAttach() (chan struct{}, uint64) {
+	t.attachMu.Lock()
+	defer t.attachMu.Unlock()
+	t.attachCh = make(chan struct{})
+	t.detachReason = DetachedToLayout
+	t.attachGen++
+	return t.attachCh, t.attachGen
+}
+
+// endAttach releases whoever is waiting on the attachment, recording why it ended. It
+// reports whether this call is the one that ended it: the second caller has nothing to
+// end, and must not rewrite the reason the first one is about to be read for.
+func (t *TmuxSession) endAttach(reason DetachReason) bool {
+	t.attachMu.Lock()
+	defer t.attachMu.Unlock()
+	if t.attachCh == nil {
+		return false
+	}
+	t.detachReason = reason
+	close(t.attachCh)
+	t.attachCh = nil
+	return true
+}
+
+// attachedAs says whether the attachment of the given generation is still the one running.
+// A goroutine holding the terminal for an attachment that has ended - or for one that has
+// been replaced by the next, which is what switching sides does - has to stop.
+func (t *TmuxSession) attachedAs(gen uint64) bool {
+	t.attachMu.Lock()
+	defer t.attachMu.Unlock()
+	return t.attachCh != nil && t.attachGen == gen
 }
 
 // DetachSafely disconnects from the current tmux session without panicking
@@ -426,10 +484,7 @@ func (t *TmuxSession) DetachSafely() error {
 	}
 
 	// Clean up attach state
-	if t.attachCh != nil {
-		close(t.attachCh)
-		t.attachCh = nil
-	}
+	t.endAttach(DetachedToLayout)
 
 	if t.cancel != nil {
 		t.cancel()
@@ -449,14 +504,22 @@ func (t *TmuxSession) DetachSafely() error {
 	return nil
 }
 
-// Detach disconnects from the current tmux session. It panics if detaching fails. At the moment, there's no
-// way to recover from a failed detach.
+// Detach disconnects from the current tmux session, giving the terminal back to the
+// session list. It panics if the PTY cannot be closed, which would leave the user's
+// terminal pane ruined either way.
 func (t *TmuxSession) Detach() {
+	t.detachFor(DetachedToLayout)
+}
+
+// detachFor disconnects and tells whoever is waiting why. The reason it is given is what
+// the user asked for; a session that turns out to have gone away overrides it, because
+// what happens next - the caller attaching the other side, or not - depends on the session
+// being there.
+func (t *TmuxSession) detachFor(reason DetachReason) {
 	// TODO: control flow is a bit messy here. If there's an error,
 	// I'm not sure if we get into a bad state. Needs testing.
 	defer func() {
-		close(t.attachCh)
-		t.attachCh = nil
+		t.endAttach(reason)
 		t.cancel = nil
 		t.ctx = nil
 		t.wg = nil
@@ -474,10 +537,18 @@ func (t *TmuxSession) Detach() {
 	// Attach goroutines should die on EOF due to the ptmx closing. Call
 	// t.Restore to set a new t.ptmx.
 	if err = t.Restore(); err != nil {
-		// This is a fatal error. Our invariant that a started TmuxSession always has a valid ptmx is violated.
-		msg := fmt.Sprintf("error closing attach pty session: %v", err)
-		log.ErrorLog.Println(msg)
-		panic(msg)
+		if !errors.Is(err, ErrSessionNotFound) {
+			// This is a fatal error. Our invariant that a started TmuxSession always has a valid ptmx is violated.
+			msg := fmt.Sprintf("error closing attach pty session: %v", err)
+			log.ErrorLog.Println(msg)
+			panic(msg)
+		}
+		// The session ended while it was attached - `exit` in the shell, or the agent's
+		// program quitting - so there is nothing to restore a PTY against. The detached
+		// PTY stays closed, which is what every dead session looks like from here, and the
+		// caller is told what actually happened rather than what was asked for.
+		log.InfoLog.Printf("tmux session %s was gone by the time it was detached", t.sanitizedName)
+		reason = DetachedSessionEnded
 	}
 
 	// Cancel goroutines created by Attach.

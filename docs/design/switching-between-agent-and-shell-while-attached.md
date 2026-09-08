@@ -44,6 +44,7 @@ earlier — invisible state deciding whether a keystroke does anything.
 6. As a user detaching after switching, I want the window showing the side I ended on, so that the layout describes where I was.
 7. As a user who attached from the diff tab and never switched, I want the diff still there when I come back, so that a look at the agent does not cost me my place.
 8. As a user detaching, I want the panes drawn at the size of the panes, so that bouncing in and out does not leave the layout mis-drawn.
+9. As a user who leaves the shell with `exit`, I want the terminal back, so that closing a shell on purpose is not how I lose the program.
 
 ## Implementation Decisions
 
@@ -65,6 +66,34 @@ still attached?" but not "what next?". `TmuxSession` now records a `DetachReason
 that has received from the channel can read it without a race. Every other path to
 detaching leaves the reason at `DetachedToLayout`, which is the answer that costs nothing
 if it is wrong: the user ends up in the session list, where they always could.
+
+### An attachment can also end without anybody asking
+
+Leaving the shell with `exit` or `ctrl+d`, or the agent's program quitting, ends the tmux
+session while claude-squad is attached to it. Before this change nothing closed the attach
+channel then: the caller waited forever with the TUI not drawing, and the `ctrl+q` a user
+reaches for at that point ran `Detach` into `Restore` on a session that no longer exists,
+which panicked. Both sides had it; making the shell - the side people close on purpose -
+reachable in one keystroke is what turned it from an oddity into a matter of time.
+
+So the end of an attachment is now something the session reports, with `DetachedSessionEnded`
+as the third reason. It is reached from either direction: the goroutine copying tmux's
+output sees EOF with nobody having asked to detach, and `detachFor` finds
+`ErrSessionNotFound` when it tries to restore the detached PTY. Both end the attachment,
+and the loop treats it as it treats any reason that is not a switch - the terminal goes
+back to the session list.
+
+Ending an attachment is therefore a thing two goroutines can race to do, so it went behind
+a mutex: `endAttach` closes the channel once, and the first caller's reason is the one the
+waiter reads. Attachments are also numbered, because the reader holding stdin cannot be
+interrupted while it is blocked on a keystroke: it checks the number it was started with
+when a key finally arrives, and a reader whose attachment is over stops there rather than
+forwarding into whatever is attached by then. The keystroke that told it costs the user
+that one key.
+
+A session that is gone gets no PTY back. The detached PTY stays closed, which is what any
+dead session looks like from the outside - `DoesSessionExist` says no, the preview falls
+back, attaching is refused - rather than a nil that the next window resize would panic on.
 
 ### The loop lives in the app, not in tmux
 
@@ -117,6 +146,12 @@ which is always shown on `?`, names the key permanently.
   reusing one that does (`ui/terminal_test.go`). This needed a seam: the pane now holds
   the function that makes a tmux session, defaulted to the real one, so a test can watch
   shells being made without a tmux server to make them in.
+- The three ways an attachment ends are pinned where they can be reached without a live
+  attachment (`session/tmux/tmux_test.go`): `endAttach` releases the waiter once and keeps
+  the first reason, a numbered attachment tells a stale reader to stop - including when
+  the next attachment has already started, which is what switching does - and detaching
+  from a session that has gone away ends the attachment as `DetachedSessionEnded` instead
+  of panicking.
 - The loop in `app/attach.go` is not tested end to end. Driving it would mean faking the
   instance, the terminal pane, the window and the menu at once, to assert an ordering the
   two tested pieces already pin down.
@@ -128,15 +163,6 @@ which is always shown on `?`, names the key permanently.
   session that is paused or still loading. A different feature that shares a mechanism.
 - **A configurable key.** `switch_key` in the config is the answer when `ctrl+y` turns out
   to hurt; see ADR-0005 for why the cost was taken now rather than the setting.
-- **An attachment whose tmux session ends under it.** Typing `exit` in the shell, or
-  leaving the agent's program, ends the tmux session while claude-squad is attached to it.
-  Nothing closes the attach channel in that case, so the terminal is left showing the
-  warning with no way forward, and the `ctrl+q` a user reaches for then panics `Detach`
-  by way of `Restore` on a session that no longer exists. This predates the change and is
-  the same on both sides; what the change does is make the shell - the side people close
-  on purpose - reachable often enough that it is worth naming. Fixing it means making the
-  end of an attachment something the session itself can report, which is a change to the
-  detach path that pausing and killing also use.
 - **The diff tab as a third side.** There is nothing to attach to: it is rendered by
   claude-squad, not by a tmux session.
 
@@ -146,6 +172,10 @@ The commands the loop produces - hiding an error box after its three seconds, re
 the panes - reach the runtime only when the attach help screen has already been seen,
 which is every attachment after the first. On the first one the loop runs inside the
 overlay's dismissal, which returns its own commands and has nowhere to put these.
+
+A session that ends under an attachment costs the user one keystroke: the reader holding
+stdin is blocked in a read, and the key that unblocks it is consumed as it discovers there
+is nothing left to forward to.
 
 Both the attach loop and bubbletea read `os.Stdin`, which is true before this change and
 unchanged by it. What is new is how often the transition happens, so a keystroke lost

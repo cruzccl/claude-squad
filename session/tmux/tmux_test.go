@@ -2,12 +2,15 @@ package tmux
 
 import (
 	cmd2 "claude-squad/cmd"
+	"claude-squad/log"
+	"context"
 	"fmt"
 	"math/rand"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"claude-squad/cmd/cmd_test"
@@ -159,4 +162,78 @@ func TestDetachReasonBeforeAnyAttachIsTheLayout(t *testing.T) {
 	session := NewTmuxSession("never-attached", "claude")
 	require.Equal(t, DetachedToLayout, session.DetachReason(),
 		"a session nobody switched away from must not claim the other side is wanted")
+}
+
+// An attachment ends for one of three reasons, and two of them can arrive at the same
+// moment: the user pressing a key claude-squad keeps, and the tmux session going away
+// under it. Whoever gets there first decides what the caller is told.
+
+func TestEndAttachHappensOnceAndKeepsTheFirstReason(t *testing.T) {
+	session := NewTmuxSession("ends-once", "claude")
+	ch, _ := session.beginAttach()
+
+	require.True(t, session.endAttach(DetachedSessionEnded), "the first end is the one that counts")
+	<-ch // closed, so a caller waiting on the attachment is released
+	require.Equal(t, DetachedSessionEnded, session.DetachReason())
+
+	require.False(t, session.endAttach(DetachedToLayout), "a second end has nothing left to end")
+	require.Equal(t, DetachedSessionEnded, session.DetachReason(),
+		"the reason the caller is about to read must not be rewritten under it")
+}
+
+func TestAttachmentGenerationTellsAStaleReaderToStop(t *testing.T) {
+	session := NewTmuxSession("generations", "claude")
+
+	_, first := session.beginAttach()
+	require.True(t, session.attachedAs(first))
+
+	session.endAttach(DetachedSessionEnded)
+	require.False(t, session.attachedAs(first), "an attachment that ended is not still running")
+
+	// Switching sides attaches again straight away. The reader left over from the
+	// attachment before must not start forwarding into the new one.
+	_, second := session.beginAttach()
+	require.False(t, session.attachedAs(first), "the old reader stays out of the new attachment")
+	require.True(t, session.attachedAs(second))
+}
+
+// Leaving the shell with `exit`, or the agent's program quitting, kills the tmux session
+// while claude-squad is attached to it. Detaching then finds nothing to go back to.
+func TestDetachingFromASessionThatIsGoneEndsTheAttachmentInsteadOfPanicking(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+
+	ptyFactory := NewMockPtyFactory(t)
+	// The session does not exist until it is started, exists from then on, and is gone
+	// again once the shell inside it has been left.
+	unborn, gone := true, false
+	cmdExec := cmd_test.MockCmdExec{
+		RunFunc: func(cmd *exec.Cmd) error {
+			if strings.Contains(cmd.String(), "has-session") {
+				if gone {
+					return fmt.Errorf("session does not exist")
+				}
+				if unborn {
+					unborn = false
+					return fmt.Errorf("session does not exist")
+				}
+			}
+			return nil
+		},
+		OutputFunc: func(cmd *exec.Cmd) ([]byte, error) { return []byte("output"), nil },
+	}
+
+	session := newTmuxSession("vanishing", "claude", ptyFactory, cmdExec)
+	require.NoError(t, session.Start(t.TempDir()))
+	ch, _ := session.beginAttach()
+	session.ctx, session.cancel = context.WithCancel(context.Background())
+	session.wg = &sync.WaitGroup{}
+
+	gone = true
+	require.NotPanics(t, func() { session.Detach() },
+		"the way out of an attachment cannot be the thing that kills the program")
+
+	<-ch
+	require.Equal(t, DetachedSessionEnded, session.DetachReason(),
+		"the caller is told the session ended rather than that the user asked for the list")
 }
