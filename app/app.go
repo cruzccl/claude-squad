@@ -176,8 +176,8 @@ func newHome(ctx context.Context, program string, autoYes bool) *home {
 // updateHandleWindowSizeEvent sets the sizes of the components.
 // The components will try to render inside their bounds.
 func (m *home) updateHandleWindowSizeEvent(msg tea.WindowSizeMsg) {
-	// List takes 30% of width, preview takes 70%
-	listWidth := int(float32(msg.Width) * 0.3)
+	// List takes 20% of width, preview takes 80%
+	listWidth := int(float32(msg.Width) * 0.2)
 	tabsWidth := msg.Width - listWidth
 
 	// Menu takes 10% of height, list and window take 90%
