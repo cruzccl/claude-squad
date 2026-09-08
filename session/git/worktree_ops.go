@@ -143,6 +143,39 @@ func (g *GitWorktree) setupNewWorktree() error {
 	return nil
 }
 
+// insideWorktreesRoot reports whether dir sits strictly below root, so pruning never
+// climbs past the worktrees root or touches a path stored outside it.
+func insideWorktreesRoot(root, dir string) bool {
+	rel, err := filepath.Rel(root, dir)
+	if err != nil {
+		return false
+	}
+	return rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// pruneEmptyWorktreeParents removes what a departed worktree leaves behind: the
+// directories a branch name with slashes nested inside the repository directory, and the
+// repository directory itself once its last worktree is gone. It walks upwards from the
+// worktree's parent and stops at the first directory that still holds something, so
+// browsing the worktrees root shows exactly the repositories that have worktrees in it.
+func pruneEmptyWorktreeParents(worktreePath string) {
+	root, err := getWorktreeDirectory()
+	if err != nil {
+		log.ErrorLog.Printf("failed to get worktree directory: %v", err)
+		return
+	}
+	for dir := filepath.Dir(worktreePath); insideWorktreesRoot(root, dir); dir = filepath.Dir(dir) {
+		entries, err := os.ReadDir(dir)
+		if err != nil || len(entries) > 0 {
+			return
+		}
+		if err := os.Remove(dir); err != nil {
+			log.ErrorLog.Printf("failed to remove empty directory %s: %v", dir, err)
+			return
+		}
+	}
+}
+
 // Cleanup removes the worktree, and the branch when deleting it would lose nothing. A
 // branch this session did not create, or one that has been committed to, is left in the
 // repository: ending a session is not a reason to destroy the work done in it.
@@ -179,6 +212,8 @@ func (g *GitWorktree) Cleanup() error {
 		errs = append(errs, err)
 	}
 
+	pruneEmptyWorktreeParents(g.worktreePath)
+
 	if len(errs) > 0 {
 		return g.combineErrors(errs)
 	}
@@ -192,6 +227,21 @@ func (g *GitWorktree) Remove() error {
 	if _, err := g.runGitCommand(g.repoPath, "worktree", "remove", "-f", g.worktreePath); err != nil {
 		return fmt.Errorf("failed to remove worktree: %w", err)
 	}
+
+	pruneEmptyWorktreeParents(g.worktreePath)
+
+	return nil
+}
+
+// RemoveDirectory deletes the worktree's directory, and the directories it leaves empty
+// above it. It is for a worktree git cannot remove itself because its registration or its
+// directory is already gone.
+func (g *GitWorktree) RemoveDirectory() error {
+	if err := os.RemoveAll(g.worktreePath); err != nil {
+		return err
+	}
+
+	pruneEmptyWorktreeParents(g.worktreePath)
 
 	return nil
 }

@@ -530,7 +530,7 @@ func (i *Instance) Pause() error {
 			log.ErrorLog.Print(err)
 		}
 		// Drop any leftover directory so a future Resume's `git worktree add` won't conflict.
-		if err := os.RemoveAll(i.gitWorktree.GetWorktreePath()); err != nil {
+		if err := i.gitWorktree.RemoveDirectory(); err != nil {
 			errs = append(errs, fmt.Errorf("failed to remove orphaned worktree directory: %w", err))
 			log.ErrorLog.Print(err)
 		}

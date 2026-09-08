@@ -83,6 +83,7 @@ prefix, worktree directory, tmux session name.
 28. As a user recreating a session for a branch whose directory was left behind, I want the stale directory dealt with, so that creation does not fail on a leftover.
 29. As a developer of this repository, I want the creation flow covered by tests that drive real key presses, so that a refactor of the overlay cannot silently break the flow.
 30. As a developer of this repository, I want the worktree layout covered by tests against real git repositories, so that path decisions are verified rather than assumed.
+31. As a user browsing `~/.claude-squad/worktrees`, I want a repository's directory to disappear when its last worktree does, so that the root shows only the repositories that have worktrees checked out right now.
 
 ## Implementation Decisions
 
@@ -173,6 +174,10 @@ prefix, worktree directory, tmux session name.
   a branch name may contain several slashes.
 - Cleanup removes the worktree directories it finds, deletes the associated branches as it
   does today, and then removes the per-repository directories that are left empty.
+- Ending or pausing a single session prunes the same way, but upwards from the worktree it
+  just removed: the directories the branch name nested, then the repository directory,
+  stopping at the first directory that still holds something. The walk never climbs past
+  the worktrees root, and never touches a stored path that lies outside it.
 
 ### What is removed
 
